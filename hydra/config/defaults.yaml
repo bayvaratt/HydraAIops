@@ -1,0 +1,19 @@
+seed: 42
+split:
+  test_size: 0.2
+  val_size: 0.2
+  temporal:
+    train_frac: 0.6
+    val_frac: 0.2
+    test_frac: 0.2
+models:
+  - baseline_majority
+  - baseline_threshold
+  - logreg
+  - random_forest
+  - lightgbm
+explain:
+  local_samples: 50
+  random_state: 42
+run:
+  max_rows: null

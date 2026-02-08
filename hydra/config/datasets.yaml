@@ -1,0 +1,29 @@
+# Update paths and columns to match your local files
+
+ton_iot:
+  path: data/ton_iot/ton_iot.csv
+  label_col: label
+  positive_label: 1
+  timestamp_col: timestamp
+  group_col: src_ip
+  duration_col: duration
+  src_bytes_col: src_bytes
+  dst_bytes_col: dst_bytes
+  src_pkts_col: src_pkts
+  dst_pkts_col: dst_pkts
+  categorical_cols: [src_ip, dst_ip, src_port, dst_port, proto, service]
+  numeric_cols: [duration, src_bytes, dst_bytes, src_pkts, dst_pkts]
+
+cic_iot2023:
+  path: data/cic_iot2023/cic_iot2023.csv
+  label_col: label
+  positive_label: 1
+  timestamp_col: timestamp
+  group_col: src_ip
+  duration_col: duration
+  src_bytes_col: src_bytes
+  dst_bytes_col: dst_bytes
+  src_pkts_col: src_pkts
+  dst_pkts_col: dst_pkts
+  categorical_cols: [src_ip, dst_ip, src_port, dst_port, proto, service]
+  numeric_cols: [duration, src_bytes, dst_bytes, src_pkts, dst_pkts]

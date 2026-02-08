@@ -1,68 +1,64 @@
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from hydra.eval.detection import find_threshold_at_recall
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class MajorityClassBaseline:
-    majority_class: int = 0
-    prevalence: float = 0.0
-
-    def fit(self, y: pd.Series) -> "MajorityClassBaseline":
-        if len(y) == 0:
-            self.prevalence = 0.0
-            self.majority_class = 0
-            return self
-        self.prevalence = float(np.mean(y.astype(float)))
-        self.majority_class = int(self.prevalence >= 0.5)
-        return self
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return np.full(len(X), self.majority_class, dtype=int)
-
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        p = float(self.prevalence)
-        proba = np.zeros((len(X), 2), dtype=float)
-        proba[:, 1] = p
-        proba[:, 0] = 1.0 - p
-        return proba
+def baseline_majority_scores(y_train: pd.Series, n_samples: int) -> np.ndarray:
+    prevalence = float(y_train.mean()) if len(y_train) else 0.0
+    return np.full(n_samples, prevalence, dtype=float)
 
 
-@dataclass
-class ThresholdBaseline:
-    threshold: Optional[float] = None
+def _find_col(df: pd.DataFrame, preferred: Optional[str], candidates: list[str]) -> Optional[str]:
+    if preferred and preferred in df.columns:
+        return preferred
+    lower_map = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in lower_map:
+            return lower_map[cand.lower()]
+    return None
 
-    def fit(self, X: pd.DataFrame, y: pd.Series, recall_target: float = 0.9) -> "ThresholdBaseline":
-        scores = self._score(X)
-        self.threshold = find_threshold_at_recall(y.values, scores, recall_target)
-        return self
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        scores = self._score(X)
-        scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
-        return np.vstack([1 - scores, scores]).T
+def baseline_threshold_scores(
+    df: pd.DataFrame,
+    colmap: Dict[str, Optional[str]],
+    logger,
+) -> np.ndarray:
+    duration_col = _find_col(df, colmap.get("duration_col"), ["duration", "dur", "flow_duration"])
+    src_bytes_col = _find_col(df, colmap.get("src_bytes_col"), ["src_bytes", "sbytes", "bytes_src", "srcByte"])
+    dst_bytes_col = _find_col(df, colmap.get("dst_bytes_col"), ["dst_bytes", "dbytes", "bytes_dst", "dstByte"])
+    src_pkts_col = _find_col(df, colmap.get("src_pkts_col"), ["src_pkts", "spkts", "src_packets"])
+    dst_pkts_col = _find_col(df, colmap.get("dst_pkts_col"), ["dst_pkts", "dpkts", "dst_packets"])
 
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        scores = self._score(X)
-        thresh = self.threshold if self.threshold is not None else np.median(scores)
-        return (scores >= thresh).astype(int)
+    score = np.zeros(len(df), dtype=float)
 
-    def _score(self, X: pd.DataFrame) -> np.ndarray:
-        def _col(name: str) -> pd.Series:
-            if name not in X.columns:
-                return pd.Series(0.0, index=X.index)
-            return pd.to_numeric(X[name], errors="coerce").fillna(0.0)
+    def add_term(col, label):
+        nonlocal score
+        if col is None:
+            logger.warning("baseline_threshold: missing %s column; skipping term", label)
+            return
+        vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        score += np.log1p(vals)
 
-        duration = _col("duration")
-        bytes_sum = _col("src_bytes") + _col("dst_bytes")
-        pkts_sum = _col("src_pkts") + _col("dst_pkts")
-        scores = np.log1p(duration) + np.log1p(bytes_sum) + np.log1p(pkts_sum)
-        return scores.to_numpy(dtype=float)
+    if duration_col is not None:
+        add_term(duration_col, "duration")
+    else:
+        logger.warning("baseline_threshold: missing duration column; skipping")
+
+    if src_bytes_col or dst_bytes_col:
+        src = pd.to_numeric(df[src_bytes_col], errors="coerce").fillna(0) if src_bytes_col else 0
+        dst = pd.to_numeric(df[dst_bytes_col], errors="coerce").fillna(0) if dst_bytes_col else 0
+        score += np.log1p(src + dst)
+    else:
+        logger.warning("baseline_threshold: missing bytes columns; skipping")
+
+    if src_pkts_col or dst_pkts_col:
+        srcp = pd.to_numeric(df[src_pkts_col], errors="coerce").fillna(0) if src_pkts_col else 0
+        dstp = pd.to_numeric(df[dst_pkts_col], errors="coerce").fillna(0) if dst_pkts_col else 0
+        score += np.log1p(srcp + dstp)
+    else:
+        logger.warning("baseline_threshold: missing packet columns; skipping")
+
+    return score
