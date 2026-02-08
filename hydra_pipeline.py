@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Module entrypoint for `python -m hydra_pipeline`."""
+
+from hydra.cli import main
+
+
+if __name__ == "__main__":
+    main()
