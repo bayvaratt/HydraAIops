@@ -17,13 +17,28 @@ from hydra.explain.importance_similarity import compute_rank_similarity, write_s
 def load_run(run_dir: Path):
     rc_path = run_dir / "run_config.json"
     metrics_path = run_dir / "metrics_summary.csv"
+    meta_path = run_dir / "evaluation_meta.json"
     if not rc_path.exists() or not metrics_path.exists():
         return None
     with open(rc_path, "r", encoding="utf-8") as f:
         rc = json.load(f)
+    meta = None
+    if meta_path.exists():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
     metrics = pd.read_csv(metrics_path)
     records = []
     for _, row in metrics.iterrows():
+        split_counts = meta.get("split_label_counts") if meta else {}
+        train_counts = split_counts.get("train", {}) if split_counts else {}
+        val_counts = split_counts.get("val", {}) if split_counts else {}
+        test_counts = split_counts.get("test", {}) if split_counts else {}
+        dup_audit = meta.get("duplicate_leakage_audit") if meta else {}
+        prevalence_test = test_counts.get("prevalence")
+        pr_lift = row.get("pr_lift")
+        if pd.isna(pr_lift):
+            if prevalence_test is not None:
+                pr_lift = row["pr_auc"] - prevalence_test
         records.append(
             {
                 "dataset": rc["dataset"]["name"],
@@ -35,10 +50,30 @@ def load_run(run_dir: Path):
                 "feature_regime": rc["feature_regime"],
                 "model": row["model"],
                 "pr_auc": row["pr_auc"],
+                "pr_lift": pr_lift,
                 "roc_auc": row["roc_auc"],
                 "fpr_at_recall_0_90": row["fpr_at_recall_0_90"],
-                "threshold": row["threshold"],
+                "precision_at_recall_0_90": row.get("precision_test_at_recall_0_90", row.get("precision_at_recall_0_90")),
+                "recall_at_threshold_test": row.get("recall_test_at_recall_0_90", row.get("recall_test_at_thr")),
+                "threshold_from_val": row.get("threshold_at_recall_0_90", row.get("threshold_from_val", row.get("threshold"))),
+                "recall_target_met": row.get("recall_target_met"),
+                "precision_val_at_recall_0_90": row.get("precision_val_at_recall_0_90"),
+                "recall_val_at_recall_0_90": row.get("recall_val_at_recall_0_90"),
                 "coverage": row["coverage"],
+                "n_train": train_counts.get("n"),
+                "n_val": val_counts.get("n"),
+                "n_test": test_counts.get("n"),
+                "pos_train": train_counts.get("n_pos"),
+                "neg_train": train_counts.get("n_neg"),
+                "prevalence_train": train_counts.get("prevalence"),
+                "pos_val": val_counts.get("n_pos"),
+                "neg_val": val_counts.get("n_neg"),
+                "prevalence_val": val_counts.get("prevalence"),
+                "pos_test": test_counts.get("n_pos"),
+                "neg_test": test_counts.get("n_neg"),
+                "prevalence_test": prevalence_test,
+                "train_test_overlap_rate": dup_audit.get("train_test_overlap_rate") if dup_audit else None,
+                "duplicate_leakage_flag": dup_audit.get("duplicate_leakage_flag") if dup_audit else None,
                 "seed": rc["seed"],
                 "commit_hash": rc["commit_hash"],
             }
@@ -132,18 +167,25 @@ def main():
     group_cols = ["split_strategy", "group_col", "feature_regime"]
     grouped = df.groupby(group_cols, dropna=False)
 
-    summary_lines.append("## Best By PR-AUC")
+    summary_lines.append("## Best By PR-Lift")
+    for keys, g in grouped:
+        best = g.sort_values("pr_lift", ascending=False).iloc[0]
+        summary_lines.append(
+            f"- {keys}: best_model={best['model']} pr_lift={best['pr_lift']:.4f}"
+        )
+
+    summary_lines.append("\n## Best By Precision@Recall=0.90")
+    for keys, g in grouped:
+        best = g.sort_values("precision_at_recall_0_90", ascending=False).iloc[0]
+        summary_lines.append(
+            f"- {keys}: best_model={best['model']} precision@0.90={best['precision_at_recall_0_90']:.4f}"
+        )
+
+    summary_lines.append("\n## Best By PR-AUC (Secondary)")
     for keys, g in grouped:
         best = g.sort_values("pr_auc", ascending=False).iloc[0]
         summary_lines.append(
             f"- {keys}: best_model={best['model']} pr_auc={best['pr_auc']:.4f}"
-        )
-
-    summary_lines.append("\n## Best By Lowest FPR@Recall=0.90")
-    for keys, g in grouped:
-        best = g.sort_values("fpr_at_recall_0_90", ascending=True).iloc[0]
-        summary_lines.append(
-            f"- {keys}: best_model={best['model']} fpr_at_recall_0_90={best['fpr_at_recall_0_90']:.4f}"
         )
 
     summary_lines.append("\n## Notes")
@@ -187,32 +229,33 @@ def main():
             summary_lines.append(f"- {label}: no paper_5feat runs found.")
             continue
 
-        best_pr = paper.sort_values("pr_auc", ascending=False).iloc[0]
-        best_fpr = paper.sort_values("fpr_at_recall_0_90", ascending=True).iloc[0]
+        best_pr = paper.sort_values("pr_lift", ascending=False).iloc[0]
+        best_prec = paper.sort_values("precision_at_recall_0_90", ascending=False).iloc[0]
         summary_lines.append(
-            f"- {label}: paper_5feat best_by_pr_auc={best_pr['model']} pr_auc={best_pr['pr_auc']:.4f} "
-            f"fpr@0.90={best_pr['fpr_at_recall_0_90']:.4f} coverage={best_pr['coverage']:.4f}"
+            f"- {label}: paper_5feat best_by_pr_lift={best_pr['model']} pr_lift={best_pr['pr_lift']:.4f} "
+            f"precision@0.90={best_pr['precision_at_recall_0_90']:.4f} coverage={best_pr['coverage']:.4f}"
         )
         summary_lines.append(
-            f"- {label}: paper_5feat best_by_lowest_fpr={best_fpr['model']} fpr@0.90={best_fpr['fpr_at_recall_0_90']:.4f} "
-            f"pr_auc={best_fpr['pr_auc']:.4f} coverage={best_fpr['coverage']:.4f}"
+            f"- {label}: paper_5feat best_by_precision@0.90={best_prec['model']} "
+            f"precision@0.90={best_prec['precision_at_recall_0_90']:.4f} pr_lift={best_prec['pr_lift']:.4f} "
+            f"coverage={best_prec['coverage']:.4f}"
         )
 
         if behav.empty:
             summary_lines.append(f"- {label}: behaviour_only runs missing; cannot compare.")
             continue
 
-        # Compare regimes using each regime's best-by-PR-AUC model for a consistent baseline.
+        # Compare regimes using each regime's best-by-PR-Lift model for a consistent baseline.
         paper_best = best_pr
-        behav_best = behav.sort_values("pr_auc", ascending=False).iloc[0]
-        delta_pr = paper_best["pr_auc"] - behav_best["pr_auc"]
-        delta_fpr = paper_best["fpr_at_recall_0_90"] - behav_best["fpr_at_recall_0_90"]
+        behav_best = behav.sort_values("pr_lift", ascending=False).iloc[0]
+        delta_pr = paper_best["pr_lift"] - behav_best["pr_lift"]
+        delta_prec = paper_best["precision_at_recall_0_90"] - behav_best["precision_at_recall_0_90"]
         delta_cov = paper_best["coverage"] - behav_best["coverage"]
-        delta_cache[label] = (delta_pr, delta_fpr, delta_cov)
+        delta_cache[label] = (delta_pr, delta_prec, delta_cov)
 
         summary_lines.append(
-            f"- {label}: paper_5feat vs behaviour_only (best-by-pr_auc) "
-            f"ΔPR-AUC={delta_pr:+.4f} ΔFPR@0.90={delta_fpr:+.4f} ΔCoverage={delta_cov:+.4f}"
+            f"- {label}: paper_5feat vs behaviour_only (best-by-pr_lift) "
+            f"ΔPR-Lift={delta_pr:+.4f} ΔPrecision@0.90={delta_prec:+.4f} ΔCoverage={delta_cov:+.4f}"
         )
 
     summary_lines.append(
@@ -240,20 +283,20 @@ def main():
     def _interpret(label: str, delta):
         if delta is None:
             return f"- {label}: insufficient runs to compare paper_5feat vs behaviour_only."
-        delta_pr, delta_fpr, _ = delta
-        if delta_pr >= -0.02 and delta_fpr <= 0.02:
-            return f"- {label}: paper_5feat is competitive on host split (ΔPR-AUC={delta_pr:+.4f}, ΔFPR@0.90={delta_fpr:+.4f})."
-        return f"- {label}: paper_5feat underperforms on host split (ΔPR-AUC={delta_pr:+.4f}, ΔFPR@0.90={delta_fpr:+.4f})."
+        delta_pr, delta_prec, _ = delta
+        if delta_pr >= -0.02 and delta_prec >= -0.02:
+            return f"- {label}: paper_5feat is competitive on host split (ΔPR-Lift={delta_pr:+.4f}, ΔPrecision@0.90={delta_prec:+.4f})."
+        return f"- {label}: paper_5feat underperforms on host split (ΔPR-Lift={delta_pr:+.4f}, ΔPrecision@0.90={delta_prec:+.4f})."
 
     summary_lines.append(_interpret("host-src_ip", delta_cache.get("host-src_ip")))
     summary_lines.append(_interpret("host-dst_ip", delta_cache.get("host-dst_ip")))
     if "host-src_ip" in delta_cache and "host-dst_ip" in delta_cache:
         avg_pr = (delta_cache["host-src_ip"][0] + delta_cache["host-dst_ip"][0]) / 2.0
         summary_lines.append(
-            f"- host splits overall: average ΔPR-AUC={avg_pr:+.4f} (paper_5feat vs behaviour_only)."
+            f"- host splits overall: average ΔPR-Lift={avg_pr:+.4f} (paper_5feat vs behaviour_only)."
         )
     else:
-        summary_lines.append("- host splits overall: insufficient runs to compute average ΔPR-AUC.")
+        summary_lines.append("- host splits overall: insufficient runs to compute average ΔPR-Lift.")
 
     (out_dir / "summary.md").write_text("\n".join(summary_lines), encoding="utf-8")
 

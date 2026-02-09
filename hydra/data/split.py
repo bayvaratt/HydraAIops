@@ -106,12 +106,16 @@ def split_host(
     group_df = _group_label_bins(groups, y)
     bin_counts = group_df["bin"].value_counts().to_dict()
     logger.info("Group label bins: %s", bin_counts)
+    overall_prev = float(y.mean()) if len(y) else 0.0
 
     can_stratify = all(v >= 2 for v in bin_counts.values())
     if not can_stratify:
         logger.warning("Insufficient groups per label-bin for stratified group split; using random group split.")
 
     train_idx = val_idx = test_idx = None
+    min_prev = 0.05
+    max_prev = 0.95
+    max_gap = 0.20
     for attempt in range(50):
         attempt_seed = seed + attempt
         try:
@@ -130,19 +134,33 @@ def split_host(
         val_idx = np.flatnonzero(groups.isin(val_groups))
         test_idx = np.flatnonzero(groups.isin(test_groups))
 
-        if (
-            len(train_idx) > 0
-            and len(val_idx) > 0
-            and len(test_idx) > 0
-            and _has_both_classes(y, train_idx)
-            and _has_both_classes(y, val_idx)
-            and _has_both_classes(y, test_idx)
-        ):
-            break
+        if len(train_idx) > 0 and len(val_idx) > 0 and len(test_idx) > 0:
+            train_prev = float(y.iloc[train_idx].mean())
+            val_prev = float(y.iloc[val_idx].mean())
+            test_prev = float(y.iloc[test_idx].mean())
+            prevalence_ok = all(
+                [
+                    min_prev <= train_prev <= max_prev,
+                    min_prev <= val_prev <= max_prev,
+                    min_prev <= test_prev <= max_prev,
+                    abs(train_prev - overall_prev) <= max_gap,
+                    abs(val_prev - overall_prev) <= max_gap,
+                    abs(test_prev - overall_prev) <= max_gap,
+                ]
+            )
+            if (
+                prevalence_ok
+                and _has_both_classes(y, train_idx)
+                and _has_both_classes(y, val_idx)
+                and _has_both_classes(y, test_idx)
+            ):
+                break
         train_idx = val_idx = test_idx = None
 
     if train_idx is None or val_idx is None or test_idx is None:
-        raise RuntimeError("Host split failed to produce class coverage in all splits after 50 attempts.")
+        raise RuntimeError(
+            "Host split failed to meet class coverage/prevalence constraints after 50 attempts."
+        )
 
     check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
     return train_idx, val_idx, test_idx
@@ -156,10 +174,12 @@ def split_temporal(
     test_frac: float,
     logger,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if timestamp_col not in df.columns:
-        raise KeyError(f"Timestamp column '{timestamp_col}' not found in dataset")
-    ts = pd.to_datetime(df[timestamp_col], errors="coerce")
-    order = np.argsort(ts.values)
+    if not timestamp_col or timestamp_col not in df.columns:
+        logger.warning("Timestamp column missing; using row order as temporal proxy.")
+        order = np.arange(len(df))
+    else:
+        ts = pd.to_datetime(df[timestamp_col], errors="coerce")
+        order = np.argsort(ts.values)
 
     n = len(df)
     n_train = int(n * train_frac)

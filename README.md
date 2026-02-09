@@ -13,6 +13,15 @@ Permutation leakage probe:
 ```bash
 python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behaviour_only --split_strategy host --group_col src_ip --seed 42 --label_permutation_probe
 ```
+ROC-AUC under a null permutation is symmetric around 0.5, so the probe checks absolute deviation from 0.5 with a dynamic tolerance based on test-set class counts. Use `--permutation_repeats N` (default 3) to average over multiple shuffles.
+
+Duplicate leakage audit:
+Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail if train→test overlap exceeds the threshold.
+
+Decision metrics:
+- `pr_lift = pr_auc - prevalence_test`
+- `precision@recall=0.90` uses a threshold chosen on validation to maximize precision while meeting recall≥0.90 (or max recall if the target is unreachable).
+Note: when `HYDRA_DISABLE_LIGHTGBM=1`, the `lightgbm` slot uses a `sklearn_gbdt` fallback (GradientBoostingClassifier) and logs the backend used.
 
 Matrix runner:
 ```bash

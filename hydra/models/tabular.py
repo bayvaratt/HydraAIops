@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
 
@@ -34,6 +35,14 @@ def build_random_forest(random_state: int) -> ModelSpec:
 
 
 def build_lightgbm(random_state: int) -> ModelSpec:
+    if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
+        model = GradientBoostingClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=random_state,
+        )
+        return ModelSpec(name="sklearn_gbdt", backend="sklearn", model=model)
     try:
         import lightgbm as lgb
 
@@ -44,6 +53,8 @@ def build_lightgbm(random_state: int) -> ModelSpec:
             subsample=0.9,
             colsample_bytree=0.9,
             random_state=random_state,
+            n_jobs=1,
+            num_threads=1,
         )
         return ModelSpec(name="lightgbm", backend="lightgbm", model=model)
     except Exception:

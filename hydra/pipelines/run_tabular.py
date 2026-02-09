@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import os
+import sys
 
 if "LOKY_MAX_CPU_COUNT" not in os.environ:
     # Avoid joblib physical core detection warning on macOS by setting a cap.
     os.environ["LOKY_MAX_CPU_COUNT"] = str(max((os.cpu_count() or 1) - 1, 1))
+if "KMP_SHM_DISABLE" not in os.environ:
+    # Avoid OpenMP shared memory errors on macOS.
+    os.environ["KMP_SHM_DISABLE"] = "1"
+if sys.platform == "darwin" and "HYDRA_DISABLE_LIGHTGBM" not in os.environ:
+    # LightGBM OpenMP can crash on macOS without /dev/shm.
+    os.environ["HYDRA_DISABLE_LIGHTGBM"] = "1"
 
 import argparse
+import hashlib
 import json
 import logging
 import random
@@ -25,13 +33,24 @@ from hydra.data.io import config_to_dict, load_dataset
 from hydra.data.preprocess import apply_feature_spec, build_feature_spec, fit_preprocessor
 from hydra.data.split import split_host, split_stratified, split_temporal
 from hydra.eval.metrics import (
+    compute_brier,
+    compute_ks_statistic,
+    compute_log_loss,
     compute_pr_auc,
     compute_roc_auc,
+    hash_rows_postprocess,
     majority_baseline_sanity,
     pr_auc_sanity_check,
+    roc_auc_null_tolerance,
+    PR_AUC_TOL,
     warn_on_constant_scores,
 )
-from hydra.eval.thresholds import coverage_at_threshold, fpr_at_threshold, select_threshold_at_recall
+from hydra.eval.thresholds import (
+    coverage_at_threshold,
+    fpr_at_threshold,
+    precision_recall_at_threshold,
+    select_threshold_max_precision_at_recall,
+)
 from hydra.explain.tabular_explain import save_global_importance, save_local_explanations
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
 from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest
@@ -51,6 +70,29 @@ def _setup_logger(run_dir: Path) -> logging.Logger:
     logger.addHandler(fh)
     logger.addHandler(sh)
     return logger
+
+
+def _hash_labels(y: pd.Series) -> str:
+    arr = np.asarray(y, dtype=np.int8)
+    return hashlib.sha256(arr.tobytes()).hexdigest()
+
+
+def _assert_binary_labels(name: str, y: pd.Series) -> None:
+    values = set(pd.Series(y).dropna().unique().tolist())
+    if not values.issubset({0, 1}):
+        raise RuntimeError(f"{name} labels are not binary: {sorted(values)}")
+
+
+def _label_stats(y: pd.Series) -> Dict[str, float]:
+    n = int(len(y))
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    prevalence = float(y.mean()) if n else 0.0
+    return {"n": n, "n_pos": n_pos, "n_neg": n_neg, "prevalence": prevalence}
+
+def _write_evaluation_meta(run_dir: Path, meta: Dict) -> None:
+    with open(run_dir / "evaluation_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
 
 
 def _git_commit_hash() -> str:
@@ -111,6 +153,8 @@ def run(args) -> None:
     run_dir = Path("runs") / args.dataset / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     logger = _setup_logger(run_dir)
+    if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
+        logger.warning("HYDRA_DISABLE_LIGHTGBM=1; LightGBM will fall back to xgboost/sklearn.")
 
     df, cfg = load_dataset(args.datasets, args.dataset)
 
@@ -121,6 +165,7 @@ def run(args) -> None:
     y = df[label_col]
     group_col_used = None
     timestamp_col_used = None
+    temporal_missing = False
 
     if split_strategy == "host":
         group_col = args.group_col or cfg.group_col
@@ -140,6 +185,8 @@ def run(args) -> None:
         timestamp_col = args.timestamp_col or cfg.timestamp_col
         if not timestamp_col:
             raise ValueError("timestamp_col must be provided for temporal split")
+        if timestamp_col not in df.columns:
+            temporal_missing = True
         timestamp_col_used = timestamp_col
         train_idx, val_idx, test_idx = split_temporal(
             df,
@@ -191,22 +238,157 @@ def run(args) -> None:
     _assert_two_classes("train", y_train)
     _assert_two_classes("val", y_val)
     _assert_two_classes("test", y_test)
+    _assert_binary_labels("y_train", y_train)
+    _assert_binary_labels("y_val", y_val)
+    _assert_binary_labels("y_test", y_test)
 
     pr_auc_sanity_check(y_test)
 
+    label_stats = {
+        "train": _label_stats(y_train),
+        "val": _label_stats(y_val),
+        "test": _label_stats(y_test),
+    }
+    logger.info(
+        "Prevalence: train=%.4f val=%.4f test=%.4f",
+        label_stats["train"]["prevalence"],
+        label_stats["val"]["prevalence"],
+        label_stats["test"]["prevalence"],
+    )
+    logger.info(
+        "Label counts: train=%d (pos=%d neg=%d) val=%d (pos=%d neg=%d) test=%d (pos=%d neg=%d)",
+        label_stats["train"]["n"], label_stats["train"]["n_pos"], label_stats["train"]["n_neg"],
+        label_stats["val"]["n"], label_stats["val"]["n_pos"], label_stats["val"]["n_neg"],
+        label_stats["test"]["n"], label_stats["test"]["n_pos"], label_stats["test"]["n_neg"],
+    )
+
+    # Identifier diagnostics: which categorical columns are included in features.
+    categorical_cols = cfg.categorical_cols or []
+    categorical_in_features = [c for c in categorical_cols if c in X_train_raw.columns]
+    if categorical_in_features:
+        logger.warning("Categorical columns included in features: %s", categorical_in_features)
+    if group_col_used and group_col_used in X_train_raw.columns:
+        logger.warning("group_col '%s' is present in features; host split may leak identifiers.", group_col_used)
+
+    evaluation_meta = {
+        "split_label_counts": label_stats,
+        "duplicate_leakage_audit": {
+            "train_val_overlap_rate": None,
+            "train_test_overlap_rate": None,
+            "val_test_overlap_rate": None,
+            "train_val_overlap_count": None,
+            "train_test_overlap_count": None,
+            "val_test_overlap_count": None,
+            "n_train_rows": None,
+            "n_val_rows": None,
+            "n_test_rows": None,
+            "duplicate_leakage_flag": False,
+            "duplicate_leakage_threshold": float(args.duplicate_leakage_threshold),
+            "fail_on_duplicate_leakage": bool(args.fail_on_duplicate_leakage),
+        },
+        "feature_audit": {
+            "categorical_in_features": categorical_in_features,
+            "group_col_in_features": bool(group_col_used and group_col_used in X_train_raw.columns),
+            "identifier_like_features": [],
+        },
+        "temporal_proxy_note": "row_order_proxy" if (split_strategy == "temporal" and temporal_missing) else None,
+    }
+    _write_evaluation_meta(run_dir, evaluation_meta)
+
     preprocessor = fit_preprocessor(X_train_raw, cat_cols, num_cols)
 
+    # Duplicate leakage check via row-hash overlap (post-preprocessing features).
+    X_train_proc = preprocessor.transform(X_train_raw)
+    X_val_proc = preprocessor.transform(X_val_raw)
+    X_test_proc = preprocessor.transform(X_test_raw)
+    train_hash = hash_rows_postprocess(X_train_proc)
+    val_hash = hash_rows_postprocess(X_val_proc)
+    test_hash = hash_rows_postprocess(X_test_proc)
+    train_set = set(train_hash)
+    val_set = set(val_hash)
+    test_set = set(test_hash)
+    overlap_train_val = len(train_set & val_set)
+    overlap_train_test = len(train_set & test_set)
+    overlap_val_test = len(val_set & test_set)
+    train_val_rate_by_val = overlap_train_val / max(len(val_hash), 1)
+    train_val_rate_by_train = overlap_train_val / max(len(train_hash), 1)
+    train_test_rate_by_test = overlap_train_test / max(len(test_hash), 1)
+    train_test_rate_by_train = overlap_train_test / max(len(train_hash), 1)
+    val_test_rate_by_test = overlap_val_test / max(len(test_hash), 1)
+    val_test_rate_by_val = overlap_val_test / max(len(val_hash), 1)
+    duplicate_flag = train_test_rate_by_test > float(args.duplicate_leakage_threshold)
+    evaluation_meta["duplicate_leakage_audit"].update(
+        {
+            "train_val_overlap_rate": train_val_rate_by_val,
+            "train_test_overlap_rate": train_test_rate_by_test,
+            "val_test_overlap_rate": val_test_rate_by_test,
+            "train_val_overlap_rate_by_val": train_val_rate_by_val,
+            "train_val_overlap_rate_by_train": train_val_rate_by_train,
+            "train_test_overlap_rate_by_test": train_test_rate_by_test,
+            "train_test_overlap_rate_by_train": train_test_rate_by_train,
+            "val_test_overlap_rate_by_test": val_test_rate_by_test,
+            "val_test_overlap_rate_by_val": val_test_rate_by_val,
+            "train_val_overlap_count": overlap_train_val,
+            "train_test_overlap_count": overlap_train_test,
+            "val_test_overlap_count": overlap_val_test,
+            "n_train_rows": len(train_hash),
+            "n_val_rows": len(val_hash),
+            "n_test_rows": len(test_hash),
+            "duplicate_leakage_flag": duplicate_flag,
+        }
+    )
+    _write_evaluation_meta(run_dir, evaluation_meta)
+    logger.info(
+        "Row-hash overlap counts: train_val=%d train_test=%d val_test=%d",
+        overlap_train_val,
+        overlap_train_test,
+        overlap_val_test,
+    )
+    logger.info(
+        "Row-hash train->test overlap: count=%d rate_by_test=%.6f",
+        overlap_train_test,
+        train_test_rate_by_test,
+    )
+    if duplicate_flag:
+        logger.warning(
+            "Duplicate leakage detected: train_test_overlap_rate_by_test=%.6f (threshold=%.6f)",
+            train_test_rate_by_test,
+            float(args.duplicate_leakage_threshold),
+        )
+        if args.fail_on_duplicate_leakage:
+            raise RuntimeError(
+                f"Duplicate leakage detected: rate={train_test_rate_by_test:.6f} threshold={float(args.duplicate_leakage_threshold):.6f}"
+            )
+
     models = args.models or defaults["models"]
+    if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1" and "lightgbm" in models:
+        logger.warning("HYDRA_DISABLE_LIGHTGBM=1; lightgbm slot will use sklearn_gbdt fallback")
     metrics_rows: List[Dict] = []
 
-    def evaluate_model(model_name: str, scores_val, scores_test, backend: str = ""):
-        prevalence = float(y_train.mean()) if len(y_train) else 0.0
-        pr_auc = compute_pr_auc(y_test, scores_test)
-        roc_auc = compute_roc_auc(y_test, scores_test, logger)
+    def evaluate_model(
+        model_name: str,
+        scores_val,
+        scores_test,
+        backend: str = "",
+        y_val_override: pd.Series | None = None,
+        y_test_override: pd.Series | None = None,
+        y_test_hash: str | None = None,
+    ):
+        y_val_used = y_val_override if y_val_override is not None else y_val
+        y_test_used = y_test_override if y_test_override is not None else y_test
+        if y_test_hash is not None and _hash_labels(y_test_used) != y_test_hash:
+            raise RuntimeError("Permutation probe y_true mismatch: hash check failed")
+        prevalence = float(y_test_used.mean()) if len(y_test_used) else 0.0
+        pr_auc = compute_pr_auc(y_test_used, scores_test)
+        roc_auc = compute_roc_auc(y_test_used, scores_test, logger)
         warn_on_constant_scores(scores_test, pr_auc, prevalence, logger)
 
-        threshold = select_threshold_at_recall(y_val, scores_val, 0.90, logger)
-        fpr = fpr_at_threshold(y_test, scores_test, threshold)
+        threshold, recall_target_met = select_threshold_max_precision_at_recall(
+            y_val_used, scores_val, 0.90, logger
+        )
+        precision_val, recall_val = precision_recall_at_threshold(y_val_used, scores_val, threshold)
+        precision_test, recall_test = precision_recall_at_threshold(y_test_used, scores_test, threshold)
+        fpr = fpr_at_threshold(y_test_used, scores_test, threshold)
         coverage = coverage_at_threshold(scores_test, threshold)
 
         if model_name == "baseline_majority":
@@ -215,10 +397,17 @@ def run(args) -> None:
         return {
             "model": model_name,
             "backend": backend,
+            "model_backend_used": backend,
             "pr_auc": pr_auc,
+            "pr_lift": pr_auc - prevalence,
             "roc_auc": roc_auc,
             "fpr_at_recall_0_90": fpr,
-            "threshold": threshold,
+            "threshold_at_recall_0_90": threshold,
+            "recall_target_met": recall_target_met,
+            "precision_val_at_recall_0_90": precision_val,
+            "recall_val_at_recall_0_90": recall_val,
+            "precision_test_at_recall_0_90": precision_test,
+            "recall_test_at_recall_0_90": recall_test,
             "coverage": coverage,
         }
 
@@ -291,32 +480,211 @@ def run(args) -> None:
     if args.label_permutation_probe:
         logger.info("Running label permutation probe")
         perm_spec = build_lightgbm(seed)
-        rng = np.random.default_rng(seed)
-        y_perm = pd.Series(rng.permutation(y_train.values), index=y_train.index)
-        perm_pipeline = Pipeline(steps=[("prep", clone(preprocessor)), ("model", perm_spec.model)])
-        perm_pipeline.fit(X_train_raw, y_perm)
-        perm_scores_val = perm_pipeline.predict_proba(X_val_raw)[:, 1]
-        perm_scores_test = perm_pipeline.predict_proba(X_test_raw)[:, 1]
-
-        prevalence = float(y_train.mean()) if len(y_train) else 0.0
-        pr_auc = compute_pr_auc(y_test, perm_scores_test)
-
-        if pr_auc > prevalence + 0.10 or pr_auc < prevalence - 0.10:
-            raise RuntimeError(
-                "Leakage suspected / eval bug: permuted PR-AUC "
-                f"{pr_auc:.4f} vs prevalence {prevalence:.4f} (expected ~prevalence)"
-            )
-
-        row = evaluate_model("lightgbm_label_shuffled", perm_scores_val, perm_scores_test, backend=perm_spec.backend)
-        metrics_rows.append(row)
-
+        if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
+            perm_spec = build_logreg(seed)
         probe = {
             "model": "lightgbm_label_shuffled",
             "backend": perm_spec.backend,
-            "pr_auc": pr_auc,
-            "prevalence": prevalence,
             "seed": seed,
+            "permutation_repeats": int(args.permutation_repeats),
+            "positive_label": cfg.positive_label,
+            "status": "running",
         }
+        try:
+            _assert_binary_labels("y_train", y_train)
+            _assert_binary_labels("y_val", y_val)
+            _assert_binary_labels("y_test", y_test)
+
+            hash_y_train = _hash_labels(y_train)
+            hash_y_val = _hash_labels(y_val)
+            hash_y_test = _hash_labels(y_test)
+            probe.update(
+                {
+                    "hash_y_train": hash_y_train,
+                    "hash_y_val": hash_y_val,
+                    "hash_y_test": hash_y_test,
+                }
+            )
+
+            n_test = len(y_test)
+            n_pos = int((y_test == 1).sum())
+            n_neg = int((y_test == 0).sum())
+            if min(n_pos, n_neg) == 0:
+                raise RuntimeError(
+                    f"Permutation ROC-AUC undefined: single class in test set "
+                    f"(n_test={n_test} n_pos={n_pos} n_neg={n_neg})"
+                )
+            roc_tol = roc_auc_null_tolerance(y_test)
+            pr_tol = PR_AUC_TOL
+            ks_tol = 0.25 if min(n_pos, n_neg) < 1000 else 0.20
+            n_perm = int(args.permutation_repeats)
+
+            perm_rows = []
+            pr_aucs = []
+            roc_aucs = []
+            briers = []
+            log_losses = []
+            ks_stats = []
+            hash_y_train_perm = []
+            hash_y_test_perm = []
+            pr_auc_constant = []
+            pr_auc_noise = []
+            roc_auc_noise = []
+            prevalence_train_perm_list = []
+            prevalence_test_perm_list = []
+
+            for i in range(n_perm):
+                rng = np.random.default_rng(seed + i)
+                y_train_perm = pd.Series(rng.permutation(y_train.values), index=y_train.index)
+                y_val_perm = pd.Series(rng.permutation(y_val.values), index=y_val.index)
+                y_test_perm = pd.Series(rng.permutation(y_test.values), index=y_test.index)
+
+                if np.array_equal(y_train_perm.values, y_train.values):
+                    raise RuntimeError(
+                        f"Permutation probe produced identical y_train (seed={seed + i}, n_train={len(y_train)})"
+                    )
+                if np.array_equal(y_test_perm.values, y_test.values):
+                    raise RuntimeError(
+                        f"Permutation probe produced identical y_test (seed={seed + i}, n_test={len(y_test)})"
+                    )
+
+                _assert_binary_labels("y_train_perm", y_train_perm)
+                _assert_binary_labels("y_val_perm", y_val_perm)
+                _assert_binary_labels("y_test_perm", y_test_perm)
+
+                hash_y_train_perm.append(_hash_labels(y_train_perm))
+                hash_y_test_perm.append(_hash_labels(y_test_perm))
+
+                prevalence_train_perm = float(y_train_perm.mean()) if len(y_train_perm) else 0.0
+                prevalence_test_perm = float(y_test_perm.mean()) if len(y_test_perm) else 0.0
+                prevalence_train_perm_list.append(prevalence_train_perm)
+                prevalence_test_perm_list.append(prevalence_test_perm)
+
+                perm_pipeline = Pipeline(steps=[("prep", clone(preprocessor)), ("model", perm_spec.model)])
+                perm_pipeline.fit(X_train_raw, y_train_perm)
+                perm_scores_val = perm_pipeline.predict_proba(X_val_raw)[:, 1]
+                perm_scores_test = perm_pipeline.predict_proba(X_test_raw)[:, 1]
+
+                pr_aucs.append(compute_pr_auc(y_test_perm, perm_scores_test))
+                roc_auc = compute_roc_auc(y_test_perm, perm_scores_test, logger)
+                if np.isnan(roc_auc):
+                    logger.warning("Permutation ROC-AUC undefined due to constant scores; treating as 0.5")
+                    roc_auc = 0.5
+                roc_aucs.append(roc_auc)
+                briers.append(compute_brier(y_test_perm, perm_scores_test))
+                log_losses.append(compute_log_loss(y_test_perm, perm_scores_test))
+                ks_stats.append(compute_ks_statistic(y_test_perm, perm_scores_test))
+
+            perm_rows.append(
+                evaluate_model(
+                    "lightgbm_label_shuffled",
+                    perm_scores_val,
+                    perm_scores_test,
+                    backend=perm_spec.backend,
+                    y_val_override=y_val_perm,
+                    y_test_override=y_test_perm,
+                    y_test_hash=hash_y_test_perm[-1],
+                )
+            )
+
+                # Constant-score control
+                const_scores = np.full(len(y_test_perm), prevalence_train_perm, dtype=float)
+                pr_const = compute_pr_auc(y_test_perm, const_scores)
+                pr_auc_constant.append(pr_const)
+                pr_const_abs_dev = abs(pr_const - prevalence_test_perm)
+                if pr_const_abs_dev > pr_tol:
+                    raise RuntimeError(
+                        "Permutation probe constant-score control failed: "
+                        f"pr_auc={pr_const:.4f} prevalence_test={prevalence_test_perm:.4f}"
+                    )
+
+                # Noise-feature control
+                rng_noise = np.random.default_rng(seed + 1000 + i)
+                X_train_noise = rng_noise.normal(size=(len(X_train_raw), X_train_raw.shape[1]))
+                X_test_noise = rng_noise.normal(size=(len(X_test_raw), X_test_raw.shape[1]))
+                noise_model = clone(perm_spec.model)
+                noise_model.fit(X_train_noise, y_train_perm)
+                noise_scores_test = noise_model.predict_proba(X_test_noise)[:, 1]
+                pr_noise = compute_pr_auc(y_test_perm, noise_scores_test)
+                roc_noise = compute_roc_auc(y_test_perm, noise_scores_test, logger)
+                pr_auc_noise.append(pr_noise)
+                roc_auc_noise.append(roc_noise)
+                if abs(pr_noise - prevalence_test_perm) > pr_tol:
+                    raise RuntimeError(
+                        "Permutation probe noise-feature control failed: "
+                        f"pr_auc={pr_noise:.4f} prevalence_test={prevalence_test_perm:.4f}"
+                    )
+
+            pr_auc_mean = float(np.mean(pr_aucs))
+            pr_auc_std = float(np.std(pr_aucs, ddof=0))
+            roc_auc_mean = float(np.mean(roc_aucs))
+            roc_auc_std = float(np.std(roc_aucs, ddof=0))
+            ks_mean = float(np.nanmean(ks_stats))
+
+            prevalence = float(y_test.mean()) if len(y_test) else 0.0
+            pr_abs_dev = abs(pr_auc_mean - prevalence)
+            roc_abs_dev = abs(roc_auc_mean - 0.5)
+
+            if pr_abs_dev > pr_tol:
+                raise RuntimeError(
+                    "Leakage suspected / eval bug: permuted PR-AUC "
+                    f"{pr_auc_mean:.4f} vs prevalence {prevalence:.4f} (abs dev {pr_abs_dev:.4f})"
+                )
+            if roc_abs_dev > roc_tol:
+                raise RuntimeError(
+                    "Leakage suspected / eval bug: permuted ROC-AUC "
+                    f"{roc_auc_mean:.4f} (abs dev {roc_abs_dev:.4f} > tol {roc_tol:.4f})"
+                )
+            if ks_mean > ks_tol:
+                raise RuntimeError(
+                    "Leakage suspected / eval bug: permuted KS statistic "
+                    f"{ks_mean:.4f} (expected ~0.0)"
+                )
+
+            # Average permutation metrics for summary.
+            row = {
+                k: float(np.nanmean([r[k] for r in perm_rows])) if isinstance(perm_rows[0][k], (int, float)) else perm_rows[0][k]
+                for k in perm_rows[0]
+            }
+            metrics_rows.append(row)
+
+            probe.update(
+                {
+                    "status": "ok",
+                    "pr_auc_mean": pr_auc_mean,
+                    "pr_auc_std": pr_auc_std,
+                    "pr_auc_permutation": pr_aucs,
+                    "roc_auc_mean": roc_auc_mean,
+                    "roc_auc_std": roc_auc_std,
+                    "roc_auc_permutation": roc_aucs,
+                    "brier": float(np.mean(briers)),
+                    "brier_permutation": briers,
+                    "log_loss": float(np.mean(log_losses)),
+                    "log_loss_permutation": log_losses,
+                    "ks": ks_mean,
+                    "ks_permutation": ks_stats,
+                    "n_test": n_test,
+                    "n_pos": n_pos,
+                    "n_neg": n_neg,
+                    "roc_auc_abs_dev_mean": roc_abs_dev,
+                    "pr_auc_abs_dev_mean": pr_abs_dev,
+                    "tol_used": roc_tol,
+                    "pr_tol_used": pr_tol,
+                    "prevalence_train_perm": float(np.mean(prevalence_train_perm_list)) if prevalence_train_perm_list else None,
+                    "prevalence_test_perm": float(np.mean(prevalence_test_perm_list)) if prevalence_test_perm_list else None,
+                    "pr_auc_constant": float(np.mean(pr_auc_constant)) if pr_auc_constant else None,
+                    "pr_auc_noise": float(np.mean(pr_auc_noise)) if pr_auc_noise else None,
+                    "roc_auc_noise": float(np.mean(roc_auc_noise)) if roc_auc_noise else None,
+                    "hash_y_train_perm": hash_y_train_perm,
+                    "hash_y_test_perm": hash_y_test_perm,
+                }
+            )
+        except Exception as exc:
+            probe["status"] = "failed"
+            probe["error_message"] = str(exc)
+            with open(run_dir / "permutation_probe.json", "w", encoding="utf-8") as f:
+                json.dump(probe, f, indent=2)
+            raise
         with open(run_dir / "permutation_probe.json", "w", encoding="utf-8") as f:
             json.dump(probe, f, indent=2)
 
@@ -331,6 +699,8 @@ def run(args) -> None:
         notes.append("stratified split is naive/historical and not deployment-realistic")
     if args.feature_regime == "identifier_inclusive":
         notes.append("identifier_inclusive is an upper bound and not deployable")
+    if split_strategy == "temporal" and temporal_missing:
+        notes.append("temporal split used row order proxy (timestamp_col missing)")
 
     # Save run config
     run_config = {
@@ -346,6 +716,7 @@ def run(args) -> None:
         "package_versions": _package_versions(),
         "models": models,
         "label_permutation_probe": bool(args.label_permutation_probe),
+        "permutation_repeats": int(args.permutation_repeats),
         "notes": " | ".join(notes),
         "paper_missing_cols": paper_missing_cols,
     }
@@ -367,6 +738,9 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--label_permutation_probe", action="store_true")
+    parser.add_argument("--permutation_repeats", type=int, default=3)
+    parser.add_argument("--duplicate_leakage_threshold", type=float, default=0.001)
+    parser.add_argument("--fail_on_duplicate_leakage", action="store_true")
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
     parser.add_argument("--models", nargs="+", default=None)

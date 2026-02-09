@@ -15,6 +15,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--label_permutation_probe", action="store_true")
+    parser.add_argument("--permutation_repeats", type=int, default=3)
+    parser.add_argument("--duplicate_leakage_threshold", type=float, default=0.001)
+    parser.add_argument("--fail_on_duplicate_leakage", action="store_true")
     parser.add_argument("--include_paper_comparison", action="store_true")
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
@@ -24,13 +27,13 @@ def main():
         ds_cfg = yaml.safe_load(f)
     if args.dataset not in ds_cfg:
         raise KeyError(f"Dataset '{args.dataset}' not found in datasets config")
-
     if args.include_paper_comparison:
         feature_regimes = ["paper_5feat", "behaviour_only", "operational", "identifier_inclusive"]
         split_specs = [
             {"split_strategy": "host", "group_col": "src_ip", "timestamp_col": None},
             {"split_strategy": "host", "group_col": "dst_ip", "timestamp_col": None},
             {"split_strategy": "stratified", "group_col": None, "timestamp_col": None},
+            {"split_strategy": "temporal", "group_col": None, "timestamp_col": ds_cfg[args.dataset].get("timestamp_col")},
         ]
     else:
         feature_regimes = ["behaviour_only", "operational", "identifier_inclusive"]
@@ -63,6 +66,9 @@ def main():
                 seed=args.seed,
                 max_rows=args.max_rows,
                 label_permutation_probe=args.label_permutation_probe,
+                permutation_repeats=args.permutation_repeats,
+                duplicate_leakage_threshold=args.duplicate_leakage_threshold,
+                fail_on_duplicate_leakage=args.fail_on_duplicate_leakage,
                 datasets=args.datasets,
                 defaults=args.defaults,
                 models=None,
