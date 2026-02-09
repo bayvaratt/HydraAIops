@@ -74,8 +74,12 @@ def save_local_explanations(
         try:
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(X_trans)
+            if hasattr(shap_values, "values"):
+                shap_values = shap_values.values
             if isinstance(shap_values, list):
                 shap_values = shap_values[-1]
+            elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+                shap_values = shap_values[:, :, -1]
             df = pd.DataFrame(shap_values, columns=feature_names)
             df.insert(0, "sample_id", X_sample.index.astype(str))
             df.to_csv(out_dir / "local_explanations.csv", index=False)

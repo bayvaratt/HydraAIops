@@ -24,6 +24,16 @@ Consolidate results:
 python scripts/consolidate_results.py --runs_dir runs/ton_iot --out_dir runs/ton_iot/consolidated
 ```
 
+Paper replication (Dharini et al., 2026):
+```bash
+python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime paper_5feat --split_strategy host --group_col src_ip --seed 42
+```
+
+Paper comparison matrix:
+```bash
+python -m hydra.pipelines.run_experiments --dataset ton_iot --seed 42 --max_rows 5000 --include_paper_comparison
+```
+
 ## Dataset configuration
 Edit `hydra/config/datasets.yaml` to point to your local dataset paths and columns. The loader supports `.csv` and `.parquet`.
 

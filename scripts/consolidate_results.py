@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
+
+# Allow running as a script without installing the package.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from hydra.explain.importance_similarity import compute_rank_similarity, write_similarity_json
 
 
 def load_run(run_dir: Path):
@@ -39,6 +46,14 @@ def load_run(run_dir: Path):
     return records
 
 
+def load_run_config(run_dir: Path):
+    rc_path = run_dir / "run_config.json"
+    if not rc_path.exists():
+        return None
+    with open(rc_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Consolidate HYDRA run results")
     parser.add_argument("--runs_dir", required=True)
@@ -50,18 +65,65 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_records = []
+    run_infos = []
     for run in runs_dir.iterdir():
         if not run.is_dir():
             continue
         recs = load_run(run)
         if recs:
             all_records.extend(recs)
+        rc = load_run_config(run)
+        if rc:
+            run_infos.append(
+                {
+                    "run_dir": run,
+                    "dataset": rc["dataset"]["name"],
+                    "feature_regime": rc["feature_regime"],
+                    "split_strategy": rc["split_strategy"],
+                    "group_col": rc.get("group_col"),
+                    "seed": rc["seed"],
+                    "timestamp": rc["timestamp"],
+                }
+            )
 
     if not all_records:
         raise SystemExit("No valid runs found")
 
     df = pd.DataFrame(all_records)
     df.to_csv(out_dir / "consolidated_metrics.csv", index=False)
+
+    # Explainability stability: compare paper_5feat vs behaviour_only global importance
+    latest_by_key = defaultdict(dict)
+    for info in run_infos:
+        key = (info["dataset"], info["split_strategy"], info["group_col"], info["seed"])
+        regime = info["feature_regime"]
+        existing = latest_by_key[key].get(regime)
+        if existing is None or info["timestamp"] > existing["timestamp"]:
+            latest_by_key[key][regime] = info
+
+    similarity_by_key_model = {}
+    for key, regimes in latest_by_key.items():
+        if "paper_5feat" not in regimes or "behaviour_only" not in regimes:
+            continue
+        paper = regimes["paper_5feat"]
+        behav = regimes["behaviour_only"]
+        for model in ["random_forest", "lightgbm"]:
+            paper_path = paper["run_dir"] / "explain" / model / "global_importance.csv"
+            behav_path = behav["run_dir"] / "explain" / model / "global_importance.csv"
+            if not paper_path.exists() or not behav_path.exists():
+                continue
+            corr, overlap = compute_rank_similarity(paper_path, behav_path, method="spearman")
+            for target in [paper, behav]:
+                out_path = target["run_dir"] / "explain" / model / "global_importance_similarity.json"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                write_similarity_json(
+                    out_path,
+                    corr,
+                    compared_regimes=["paper_5feat", "behaviour_only"],
+                    method="spearman",
+                    overlap_features=overlap,
+                )
+            similarity_by_key_model[(key, model)] = corr
 
     # Summary
     summary_lines = []
@@ -91,6 +153,107 @@ def main():
         summary_lines.append(
             "- Stratified splits can inflate results by mixing identities across train/val/test; treat as naive baseline only."
         )
+
+    # Paper replication section
+    summary_lines.append("\n## Paper Replication: Minimal 5-Feature Set (Dharini et al., 2026)")
+
+    if "ton_iot" in set(df["dataset"]):
+        df_paper = df[df["dataset"] == "ton_iot"].copy()
+    else:
+        df_paper = df.copy()
+
+    split_defs = [
+        ("stratified", {"split_strategy": "stratified", "group_col": None}),
+        ("host-src_ip", {"split_strategy": "host", "group_col": "src_ip"}),
+        ("host-dst_ip", {"split_strategy": "host", "group_col": "dst_ip"}),
+    ]
+
+    delta_cache = {}
+    for label, spec in split_defs:
+        if spec["split_strategy"] == "stratified":
+            df_split = df_paper[df_paper["split_strategy"] == spec["split_strategy"]]
+        elif spec["group_col"] is None:
+            df_split = df_paper[(df_paper["split_strategy"] == spec["split_strategy"]) & df_paper["group_col"].isna()]
+        else:
+            df_split = df_paper[
+                (df_paper["split_strategy"] == spec["split_strategy"])
+                & (df_paper["group_col"] == spec["group_col"])
+            ]
+
+        paper = df_split[df_split["feature_regime"] == "paper_5feat"]
+        behav = df_split[df_split["feature_regime"] == "behaviour_only"]
+
+        if paper.empty:
+            summary_lines.append(f"- {label}: no paper_5feat runs found.")
+            continue
+
+        best_pr = paper.sort_values("pr_auc", ascending=False).iloc[0]
+        best_fpr = paper.sort_values("fpr_at_recall_0_90", ascending=True).iloc[0]
+        summary_lines.append(
+            f"- {label}: paper_5feat best_by_pr_auc={best_pr['model']} pr_auc={best_pr['pr_auc']:.4f} "
+            f"fpr@0.90={best_pr['fpr_at_recall_0_90']:.4f} coverage={best_pr['coverage']:.4f}"
+        )
+        summary_lines.append(
+            f"- {label}: paper_5feat best_by_lowest_fpr={best_fpr['model']} fpr@0.90={best_fpr['fpr_at_recall_0_90']:.4f} "
+            f"pr_auc={best_fpr['pr_auc']:.4f} coverage={best_fpr['coverage']:.4f}"
+        )
+
+        if behav.empty:
+            summary_lines.append(f"- {label}: behaviour_only runs missing; cannot compare.")
+            continue
+
+        # Compare regimes using each regime's best-by-PR-AUC model for a consistent baseline.
+        paper_best = best_pr
+        behav_best = behav.sort_values("pr_auc", ascending=False).iloc[0]
+        delta_pr = paper_best["pr_auc"] - behav_best["pr_auc"]
+        delta_fpr = paper_best["fpr_at_recall_0_90"] - behav_best["fpr_at_recall_0_90"]
+        delta_cov = paper_best["coverage"] - behav_best["coverage"]
+        delta_cache[label] = (delta_pr, delta_fpr, delta_cov)
+
+        summary_lines.append(
+            f"- {label}: paper_5feat vs behaviour_only (best-by-pr_auc) "
+            f"ΔPR-AUC={delta_pr:+.4f} ΔFPR@0.90={delta_fpr:+.4f} ΔCoverage={delta_cov:+.4f}"
+        )
+
+    summary_lines.append(
+        "- Stratified splits can inflate TON-IoT performance due to scenario/host overlap; host/time splits are closer to deployment reality."
+    )
+    summary_lines.append("- identifier_inclusive is an upper bound / not deployable.")
+
+    # Explainability stability (host-src_ip)
+    host_key = None
+    for key in similarity_by_key_model:
+        (dataset, split_strategy, group_col, seed), _ = key
+        if dataset == "ton_iot" and split_strategy == "host" and group_col == "src_ip":
+            host_key = (dataset, split_strategy, group_col, seed)
+            break
+    if host_key:
+        for model in ["random_forest", "lightgbm"]:
+            corr = similarity_by_key_model.get((host_key, model))
+            if corr is None:
+                continue
+            summary_lines.append(
+                f"- Explainability stability (host-src_ip, {model}): spearman={corr:.4f}"
+            )
+
+    # Interpretation bullets (host splits)
+    def _interpret(label: str, delta):
+        if delta is None:
+            return f"- {label}: insufficient runs to compare paper_5feat vs behaviour_only."
+        delta_pr, delta_fpr, _ = delta
+        if delta_pr >= -0.02 and delta_fpr <= 0.02:
+            return f"- {label}: paper_5feat is competitive on host split (ΔPR-AUC={delta_pr:+.4f}, ΔFPR@0.90={delta_fpr:+.4f})."
+        return f"- {label}: paper_5feat underperforms on host split (ΔPR-AUC={delta_pr:+.4f}, ΔFPR@0.90={delta_fpr:+.4f})."
+
+    summary_lines.append(_interpret("host-src_ip", delta_cache.get("host-src_ip")))
+    summary_lines.append(_interpret("host-dst_ip", delta_cache.get("host-dst_ip")))
+    if "host-src_ip" in delta_cache and "host-dst_ip" in delta_cache:
+        avg_pr = (delta_cache["host-src_ip"][0] + delta_cache["host-dst_ip"][0]) / 2.0
+        summary_lines.append(
+            f"- host splits overall: average ΔPR-AUC={avg_pr:+.4f} (paper_5feat vs behaviour_only)."
+        )
+    else:
+        summary_lines.append("- host splits overall: insufficient runs to compute average ΔPR-AUC.")
 
     (out_dir / "summary.md").write_text("\n".join(summary_lines), encoding="utf-8")
 

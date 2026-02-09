@@ -15,9 +15,9 @@ class ModelSpec:
 
 def build_logreg(random_state: int) -> ModelSpec:
     model = LogisticRegression(
-        max_iter=1000,
+        max_iter=5000,
+        tol=1e-3,
         solver="saga",
-        n_jobs=-1,
         random_state=random_state,
     )
     return ModelSpec(name="logreg", backend="sklearn", model=model)

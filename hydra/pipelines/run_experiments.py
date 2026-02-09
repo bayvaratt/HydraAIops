@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_rows", type=int, default=None)
     parser.add_argument("--label_permutation_probe", action="store_true")
+    parser.add_argument("--include_paper_comparison", action="store_true")
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
     args = parser.parse_args()
@@ -24,16 +25,32 @@ def main():
     if args.dataset not in ds_cfg:
         raise KeyError(f"Dataset '{args.dataset}' not found in datasets config")
 
-    feature_regimes = ["behaviour_only", "operational", "identifier_inclusive"]
-    split_strategies = ["host", "temporal", "stratified"]
+    if args.include_paper_comparison:
+        feature_regimes = ["paper_5feat", "behaviour_only", "operational", "identifier_inclusive"]
+        split_specs = [
+            {"split_strategy": "host", "group_col": "src_ip", "timestamp_col": None},
+            {"split_strategy": "host", "group_col": "dst_ip", "timestamp_col": None},
+            {"split_strategy": "stratified", "group_col": None, "timestamp_col": None},
+        ]
+    else:
+        feature_regimes = ["behaviour_only", "operational", "identifier_inclusive"]
+        split_specs = [
+            {"split_strategy": "host", "group_col": ds_cfg[args.dataset].get("group_col"), "timestamp_col": None},
+            {"split_strategy": "temporal", "group_col": None, "timestamp_col": ds_cfg[args.dataset].get("timestamp_col")},
+            {"split_strategy": "stratified", "group_col": None, "timestamp_col": None},
+        ]
 
     for regime in feature_regimes:
-        for split in split_strategies:
+        for spec in split_specs:
+            split = spec["split_strategy"]
+            group_col = spec.get("group_col")
+            timestamp_col = spec.get("timestamp_col")
+
             # Skip temporal if no timestamp_col
-            if split == "temporal" and not ds_cfg[args.dataset].get("timestamp_col"):
+            if split == "temporal" and not timestamp_col:
                 print(f"Skipping temporal split for {args.dataset} (no timestamp_col)")
                 continue
-            if split == "host" and not ds_cfg[args.dataset].get("group_col"):
+            if split == "host" and not group_col:
                 print(f"Skipping host split for {args.dataset} (no group_col)")
                 continue
 
@@ -41,8 +58,8 @@ def main():
                 dataset=args.dataset,
                 feature_regime=regime,
                 split_strategy=split,
-                group_col=ds_cfg[args.dataset].get("group_col"),
-                timestamp_col=ds_cfg[args.dataset].get("timestamp_col"),
+                group_col=group_col,
+                timestamp_col=timestamp_col,
                 seed=args.seed,
                 max_rows=args.max_rows,
                 label_permutation_probe=args.label_permutation_probe,

@@ -17,6 +17,7 @@ class FeatureSpec:
     keep_numeric: List[str]
     derived_categorical: Dict[str, str]
     dropped: List[str]
+    missing_required: List[str] | None = None
 
 
 def _infer_types(
@@ -81,6 +82,26 @@ def build_feature_spec(
     numeric_cols: List[str] | None,
     logger,
 ) -> FeatureSpec:
+    if regime == "paper_5feat":
+        required = ["duration", "src_bytes", "dst_bytes", "src_ip_bytes", "dst_ip_bytes"]
+        missing = [c for c in required if c not in train_df.columns]
+        present = [c for c in required if c in train_df.columns]
+        if missing:
+            logger.warning("paper_5feat missing required columns: %s", missing)
+        if len(present) < 3:
+            raise RuntimeError(
+                f"paper_5feat requires at least 3 of 5 columns; present={present} missing={missing}"
+            )
+        logger.info("paper_5feat selected columns: %s", present)
+        return FeatureSpec(
+            regime=regime,
+            keep_categorical=[],
+            keep_numeric=present,
+            derived_categorical={},
+            dropped=[],
+            missing_required=missing,
+        )
+
     cat_cols, num_cols = _infer_types(train_df.drop(columns=[label_col]), categorical_cols, numeric_cols)
     cat_cols = [c for c in cat_cols if c != label_col]
     num_cols = [c for c in num_cols if c != label_col]

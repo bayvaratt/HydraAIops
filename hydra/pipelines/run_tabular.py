@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+
+if "LOKY_MAX_CPU_COUNT" not in os.environ:
+    # Avoid joblib physical core detection warning on macOS by setting a cap.
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(max((os.cpu_count() or 1) - 1, 1))
+
 import argparse
 import json
 import logging
-import os
 import random
 import subprocess
 from datetime import datetime
@@ -19,7 +24,13 @@ from sklearn.pipeline import Pipeline
 from hydra.data.io import config_to_dict, load_dataset
 from hydra.data.preprocess import apply_feature_spec, build_feature_spec, fit_preprocessor
 from hydra.data.split import split_host, split_stratified, split_temporal
-from hydra.eval.metrics import compute_pr_auc, compute_roc_auc, majority_baseline_sanity, warn_on_constant_scores
+from hydra.eval.metrics import (
+    compute_pr_auc,
+    compute_roc_auc,
+    majority_baseline_sanity,
+    pr_auc_sanity_check,
+    warn_on_constant_scores,
+)
 from hydra.eval.thresholds import coverage_at_threshold, fpr_at_threshold, select_threshold_at_recall
 from hydra.explain.tabular_explain import save_global_importance, save_local_explanations
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
@@ -108,10 +119,14 @@ def run(args) -> None:
 
     label_col = cfg.label_col
     y = df[label_col]
+    group_col_used = None
+    timestamp_col_used = None
+
     if split_strategy == "host":
         group_col = args.group_col or cfg.group_col
         if not group_col:
             raise ValueError("group_col must be provided for host split")
+        group_col_used = group_col
         train_idx, val_idx, test_idx = split_host(
             df,
             y,
@@ -125,6 +140,7 @@ def run(args) -> None:
         timestamp_col = args.timestamp_col or cfg.timestamp_col
         if not timestamp_col:
             raise ValueError("timestamp_col must be provided for temporal split")
+        timestamp_col_used = timestamp_col
         train_idx, val_idx, test_idx = split_temporal(
             df,
             timestamp_col,
@@ -167,6 +183,16 @@ def run(args) -> None:
     y_train = y.iloc[train_idx]
     y_val = y.iloc[val_idx]
     y_test = y.iloc[test_idx]
+
+    def _assert_two_classes(split_name: str, y_split: pd.Series) -> None:
+        if y_split.nunique(dropna=True) < 2:
+            raise RuntimeError(f"{split_name} split has <2 classes; aborting")
+
+    _assert_two_classes("train", y_train)
+    _assert_two_classes("val", y_val)
+    _assert_two_classes("test", y_test)
+
+    pr_auc_sanity_check(y_test)
 
     preprocessor = fit_preprocessor(X_train_raw, cat_cols, num_cols)
 
@@ -275,9 +301,10 @@ def run(args) -> None:
         prevalence = float(y_train.mean()) if len(y_train) else 0.0
         pr_auc = compute_pr_auc(y_test, perm_scores_test)
 
-        if pr_auc > prevalence + 0.10:
+        if pr_auc > prevalence + 0.10 or pr_auc < prevalence - 0.10:
             raise RuntimeError(
-                f"Leakage suspected / eval bug: permuted PR-AUC {pr_auc:.4f} > prevalence {prevalence:.4f} + 0.10"
+                "Leakage suspected / eval bug: permuted PR-AUC "
+                f"{pr_auc:.4f} vs prevalence {prevalence:.4f} (expected ~prevalence)"
             )
 
         row = evaluate_model("lightgbm_label_shuffled", perm_scores_val, perm_scores_test, backend=perm_spec.backend)
@@ -297,13 +324,21 @@ def run(args) -> None:
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(run_dir / "metrics_summary.csv", index=False)
 
+    paper_missing_cols = spec.missing_required or []
+
+    notes = []
+    if split_strategy == "stratified":
+        notes.append("stratified split is naive/historical and not deployment-realistic")
+    if args.feature_regime == "identifier_inclusive":
+        notes.append("identifier_inclusive is an upper bound and not deployable")
+
     # Save run config
     run_config = {
         "dataset": config_to_dict(cfg),
         "feature_regime": args.feature_regime,
         "split_strategy": split_strategy,
-        "group_col": args.group_col or cfg.group_col,
-        "timestamp_col": args.timestamp_col or cfg.timestamp_col,
+        "group_col": group_col_used,
+        "timestamp_col": timestamp_col_used,
         "seed": seed,
         "run_id": run_id,
         "timestamp": timestamp,
@@ -311,7 +346,8 @@ def run(args) -> None:
         "package_versions": _package_versions(),
         "models": models,
         "label_permutation_probe": bool(args.label_permutation_probe),
-        "notes": "stratified split is not deployment-realistic" if split_strategy == "stratified" else "",
+        "notes": " | ".join(notes),
+        "paper_missing_cols": paper_missing_cols,
     }
     with open(run_dir / "run_config.json", "w", encoding="utf-8") as f:
         json.dump(run_config, f, indent=2)
@@ -320,7 +356,11 @@ def run(args) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Run HYDRA tabular IDS experiment")
     parser.add_argument("--dataset", required=True, help="Dataset name in datasets.yaml")
-    parser.add_argument("--feature_regime", required=True, choices=["behaviour_only", "operational", "identifier_inclusive"])
+    parser.add_argument(
+        "--feature_regime",
+        required=True,
+        choices=["behaviour_only", "operational", "identifier_inclusive", "paper_5feat"],
+    )
     parser.add_argument("--split_strategy", required=True, choices=["host", "temporal", "stratified"])
     parser.add_argument("--group_col", default=None)
     parser.add_argument("--timestamp_col", default=None)

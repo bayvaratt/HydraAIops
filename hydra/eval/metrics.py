@@ -8,6 +8,15 @@ def compute_pr_auc(y_true, scores):
     return float(average_precision_score(y_true, scores))
 
 
+def pr_auc_sanity_check(y_true, eps: float = 1e-6):
+    y = np.asarray(y_true)
+    prevalence = float(np.mean(y)) if len(y) else 0.0
+    const_scores = np.full(len(y), prevalence, dtype=float)
+    ap = float(average_precision_score(y, const_scores))
+    if abs(ap - prevalence) > eps:
+        raise RuntimeError("PR-AUC calculation inconsistent — check pos_label / score column")
+
+
 def compute_roc_auc(y_true, scores, logger):
     if len(np.unique(y_true)) < 2:
         logger.warning("ROC-AUC undefined: only one class present")
