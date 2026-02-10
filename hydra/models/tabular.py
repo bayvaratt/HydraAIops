@@ -34,15 +34,20 @@ def build_random_forest(random_state: int) -> ModelSpec:
     return ModelSpec(name="random_forest", backend="sklearn", model=model)
 
 
+def build_sklearn_gbdt(random_state: int) -> ModelSpec:
+    model = GradientBoostingClassifier(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=3,
+        random_state=random_state,
+    )
+    return ModelSpec(name="sklearn_gbdt", backend="sklearn", model=model)
+
+
 def build_lightgbm(random_state: int) -> ModelSpec:
     if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
-        model = GradientBoostingClassifier(
-            n_estimators=300,
-            learning_rate=0.05,
-            max_depth=3,
-            random_state=random_state,
-        )
-        return ModelSpec(name="sklearn_gbdt", backend="sklearn", model=model)
+        spec = build_sklearn_gbdt(random_state)
+        return ModelSpec(name="lightgbm", backend="sklearn_gbdt", model=spec.model)
     try:
         import lightgbm as lgb
 

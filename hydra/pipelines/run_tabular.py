@@ -53,7 +53,7 @@ from hydra.eval.thresholds import (
 )
 from hydra.explain.tabular_explain import save_global_importance, save_local_explanations
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
-from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest
+from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
@@ -75,6 +75,37 @@ def _setup_logger(run_dir: Path) -> logging.Logger:
 def _hash_labels(y: pd.Series) -> str:
     arr = np.asarray(y, dtype=np.int8)
     return hashlib.sha256(arr.tobytes()).hexdigest()
+
+
+def _format_model_comparison_table(metrics_df: pd.DataFrame) -> str:
+    display_map = {
+        "model": "model",
+        "backend": "backend",
+        "pr_auc": "pr_auc",
+        "pr_lift": "pr_lift",
+        "roc_auc": "roc_auc",
+        "precision_test_at_recall_0_90": "precision@0.90",
+        "fpr_at_recall_0_90": "fpr@0.90",
+        "coverage": "coverage",
+    }
+    available = [col for col in display_map if col in metrics_df.columns]
+    if not available:
+        return ""
+    table_df = metrics_df[available].copy()
+    if "pr_lift" in table_df.columns:
+        table_df = table_df.sort_values("pr_lift", ascending=False)
+    table_df = table_df.rename(columns={k: display_map[k] for k in available})
+
+    def _fmt_cell(val):
+        if isinstance(val, (int, float, np.floating)):
+            if np.isnan(val):
+                return "nan"
+            return f"{float(val):.4f}"
+        return "nan" if val is None else str(val)
+
+    for col in table_df.columns:
+        table_df[col] = table_df[col].map(_fmt_cell)
+    return table_df.to_string(index=False)
 
 
 def _assert_binary_labels(name: str, y: pd.Series) -> None:
@@ -273,6 +304,9 @@ def run(args) -> None:
     evaluation_meta = {
         "split_label_counts": label_stats,
         "duplicate_leakage_audit": {
+            "train_val_overlap_rate_definition": "by_val",
+            "train_test_overlap_rate_definition": "by_test",
+            "val_test_overlap_rate_definition": "by_test",
             "train_val_overlap_rate": None,
             "train_test_overlap_rate": None,
             "val_test_overlap_rate": None,
@@ -296,6 +330,7 @@ def run(args) -> None:
     _write_evaluation_meta(run_dir, evaluation_meta)
 
     preprocessor = fit_preprocessor(X_train_raw, cat_cols, num_cols)
+    preprocessor.fit(X_train_raw)
 
     # Duplicate leakage check via row-hash overlap (post-preprocessing features).
     X_train_proc = preprocessor.transform(X_train_raw)
@@ -319,6 +354,7 @@ def run(args) -> None:
     duplicate_flag = train_test_rate_by_test > float(args.duplicate_leakage_threshold)
     evaluation_meta["duplicate_leakage_audit"].update(
         {
+            # Legacy overlap rates follow the *_overlap_rate_definition fields above.
             "train_val_overlap_rate": train_val_rate_by_val,
             "train_test_overlap_rate": train_test_rate_by_test,
             "val_test_overlap_rate": val_test_rate_by_test,
@@ -345,14 +381,16 @@ def run(args) -> None:
         overlap_val_test,
     )
     logger.info(
-        "Row-hash train->test overlap: count=%d rate_by_test=%.6f",
+        "Row-hash train->test overlap: count=%d rate_by_test=%.6f rate_by_train=%.6f",
         overlap_train_test,
         train_test_rate_by_test,
+        train_test_rate_by_train,
     )
     if duplicate_flag:
         logger.warning(
-            "Duplicate leakage detected: train_test_overlap_rate_by_test=%.6f (threshold=%.6f)",
+            "Duplicate leakage detected: train_test_overlap_rate_by_test=%.6f train_test_overlap_rate_by_train=%.6f (threshold=%.6f)",
             train_test_rate_by_test,
+            train_test_rate_by_train,
             float(args.duplicate_leakage_threshold),
         )
         if args.fail_on_duplicate_leakage:
@@ -439,6 +477,8 @@ def run(args) -> None:
             spec_model = build_logreg(seed)
         elif model_name == "random_forest":
             spec_model = build_random_forest(seed)
+        elif model_name == "sklearn_gbdt":
+            spec_model = build_sklearn_gbdt(seed)
         elif model_name == "lightgbm":
             spec_model = build_lightgbm(seed)
         else:
@@ -587,33 +627,33 @@ def run(args) -> None:
                 )
             )
 
-                # Constant-score control
-                const_scores = np.full(len(y_test_perm), prevalence_train_perm, dtype=float)
-                pr_const = compute_pr_auc(y_test_perm, const_scores)
-                pr_auc_constant.append(pr_const)
-                pr_const_abs_dev = abs(pr_const - prevalence_test_perm)
-                if pr_const_abs_dev > pr_tol:
-                    raise RuntimeError(
-                        "Permutation probe constant-score control failed: "
-                        f"pr_auc={pr_const:.4f} prevalence_test={prevalence_test_perm:.4f}"
-                    )
+            # Constant-score control
+            const_scores = np.full(len(y_test_perm), prevalence_train_perm, dtype=float)
+            pr_const = compute_pr_auc(y_test_perm, const_scores)
+            pr_auc_constant.append(pr_const)
+            pr_const_abs_dev = abs(pr_const - prevalence_test_perm)
+            if pr_const_abs_dev > pr_tol:
+                raise RuntimeError(
+                    "Permutation probe constant-score control failed: "
+                    f"pr_auc={pr_const:.4f} prevalence_test={prevalence_test_perm:.4f}"
+                )
 
-                # Noise-feature control
-                rng_noise = np.random.default_rng(seed + 1000 + i)
-                X_train_noise = rng_noise.normal(size=(len(X_train_raw), X_train_raw.shape[1]))
-                X_test_noise = rng_noise.normal(size=(len(X_test_raw), X_test_raw.shape[1]))
-                noise_model = clone(perm_spec.model)
-                noise_model.fit(X_train_noise, y_train_perm)
-                noise_scores_test = noise_model.predict_proba(X_test_noise)[:, 1]
-                pr_noise = compute_pr_auc(y_test_perm, noise_scores_test)
-                roc_noise = compute_roc_auc(y_test_perm, noise_scores_test, logger)
-                pr_auc_noise.append(pr_noise)
-                roc_auc_noise.append(roc_noise)
-                if abs(pr_noise - prevalence_test_perm) > pr_tol:
-                    raise RuntimeError(
-                        "Permutation probe noise-feature control failed: "
-                        f"pr_auc={pr_noise:.4f} prevalence_test={prevalence_test_perm:.4f}"
-                    )
+            # Noise-feature control
+            rng_noise = np.random.default_rng(seed + 1000 + i)
+            X_train_noise = rng_noise.normal(size=(len(X_train_raw), X_train_raw.shape[1]))
+            X_test_noise = rng_noise.normal(size=(len(X_test_raw), X_test_raw.shape[1]))
+            noise_model = clone(perm_spec.model)
+            noise_model.fit(X_train_noise, y_train_perm)
+            noise_scores_test = noise_model.predict_proba(X_test_noise)[:, 1]
+            pr_noise = compute_pr_auc(y_test_perm, noise_scores_test)
+            roc_noise = compute_roc_auc(y_test_perm, noise_scores_test, logger)
+            pr_auc_noise.append(pr_noise)
+            roc_auc_noise.append(roc_noise)
+            if abs(pr_noise - prevalence_test_perm) > pr_tol:
+                raise RuntimeError(
+                    "Permutation probe noise-feature control failed: "
+                    f"pr_auc={pr_noise:.4f} prevalence_test={prevalence_test_perm:.4f}"
+                )
 
             pr_auc_mean = float(np.mean(pr_aucs))
             pr_auc_std = float(np.std(pr_aucs, ddof=0))
@@ -691,6 +731,9 @@ def run(args) -> None:
     # Save metrics summary
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(run_dir / "metrics_summary.csv", index=False)
+    table = _format_model_comparison_table(metrics_df)
+    if table:
+        logger.info("Model comparison:\n%s", table)
 
     paper_missing_cols = spec.missing_required or []
 

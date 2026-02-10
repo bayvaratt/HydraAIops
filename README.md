@@ -16,7 +16,7 @@ python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behavio
 ROC-AUC under a null permutation is symmetric around 0.5, so the probe checks absolute deviation from 0.5 with a dynamic tolerance based on test-set class counts. Use `--permutation_repeats N` (default 3) to average over multiple shuffles.
 
 Duplicate leakage audit:
-Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail if train→test overlap exceeds the threshold.
+Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. The default train→test overlap rate uses the test-set denominator (by_test). Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail if train→test overlap exceeds the threshold. Both by_test and by_train rates are recorded in `evaluation_meta.json`.
 
 Decision metrics:
 - `pr_lift = pr_auc - prevalence_test`

@@ -6,12 +6,33 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # Allow running as a script without installing the package.
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from hydra.explain.importance_similarity import compute_rank_similarity, write_similarity_json
+
+
+def fmt(x, nd=4):
+    return "nan" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{float(x):.{nd}f}"
+
+
+def fmt_signed(x, nd=4):
+    rendered = fmt(x, nd)
+    if rendered == "nan":
+        return rendered
+    return f"+{rendered}" if float(x) >= 0 else rendered
+
+
+def best_by_metric(group: pd.DataFrame, metric: str):
+    if metric not in group.columns:
+        return None
+    series = pd.to_numeric(group[metric], errors="coerce")
+    if series.notna().sum() == 0:
+        return None
+    return group.loc[series.idxmax()]
 
 
 def load_run(run_dir: Path):
@@ -72,7 +93,15 @@ def load_run(run_dir: Path):
                 "pos_test": test_counts.get("n_pos"),
                 "neg_test": test_counts.get("n_neg"),
                 "prevalence_test": prevalence_test,
-                "train_test_overlap_rate": dup_audit.get("train_test_overlap_rate") if dup_audit else None,
+                "train_test_overlap_rate": (
+                    dup_audit.get("train_test_overlap_rate_by_test", dup_audit.get("train_test_overlap_rate"))
+                    if dup_audit
+                    else None
+                ),
+                "train_test_overlap_rate_by_test": dup_audit.get("train_test_overlap_rate_by_test") if dup_audit else None,
+                "train_test_overlap_rate_by_train": dup_audit.get("train_test_overlap_rate_by_train") if dup_audit else None,
+                "train_val_overlap_rate_by_val": dup_audit.get("train_val_overlap_rate_by_val") if dup_audit else None,
+                "val_test_overlap_rate_by_test": dup_audit.get("val_test_overlap_rate_by_test") if dup_audit else None,
                 "duplicate_leakage_flag": dup_audit.get("duplicate_leakage_flag") if dup_audit else None,
                 "seed": rc["seed"],
                 "commit_hash": rc["commit_hash"],
@@ -169,24 +198,29 @@ def main():
 
     summary_lines.append("## Best By PR-Lift")
     for keys, g in grouped:
-        best = g.sort_values("pr_lift", ascending=False).iloc[0]
-        summary_lines.append(
-            f"- {keys}: best_model={best['model']} pr_lift={best['pr_lift']:.4f}"
-        )
+        best = best_by_metric(g, "pr_lift")
+        if best is None:
+            summary_lines.append(f"- {keys}: insufficient data for metric pr_lift")
+            continue
+        summary_lines.append(f"- {keys}: best_model={best['model']} pr_lift={fmt(best['pr_lift'])}")
 
     summary_lines.append("\n## Best By Precision@Recall=0.90")
     for keys, g in grouped:
-        best = g.sort_values("precision_at_recall_0_90", ascending=False).iloc[0]
+        best = best_by_metric(g, "precision_at_recall_0_90")
+        if best is None:
+            summary_lines.append(f"- {keys}: insufficient data for metric precision_at_recall_0_90")
+            continue
         summary_lines.append(
-            f"- {keys}: best_model={best['model']} precision@0.90={best['precision_at_recall_0_90']:.4f}"
+            f"- {keys}: best_model={best['model']} precision@0.90={fmt(best['precision_at_recall_0_90'])}"
         )
 
     summary_lines.append("\n## Best By PR-AUC (Secondary)")
     for keys, g in grouped:
-        best = g.sort_values("pr_auc", ascending=False).iloc[0]
-        summary_lines.append(
-            f"- {keys}: best_model={best['model']} pr_auc={best['pr_auc']:.4f}"
-        )
+        best = best_by_metric(g, "pr_auc")
+        if best is None:
+            summary_lines.append(f"- {keys}: insufficient data for metric pr_auc")
+            continue
+        summary_lines.append(f"- {keys}: best_model={best['model']} pr_auc={fmt(best['pr_auc'])}")
 
     summary_lines.append("\n## Notes")
     summary_lines.append("- identifier_inclusive is an upper bound and not deployment-realistic.")
@@ -229,17 +263,23 @@ def main():
             summary_lines.append(f"- {label}: no paper_5feat runs found.")
             continue
 
-        best_pr = paper.sort_values("pr_lift", ascending=False).iloc[0]
-        best_prec = paper.sort_values("precision_at_recall_0_90", ascending=False).iloc[0]
-        summary_lines.append(
-            f"- {label}: paper_5feat best_by_pr_lift={best_pr['model']} pr_lift={best_pr['pr_lift']:.4f} "
-            f"precision@0.90={best_pr['precision_at_recall_0_90']:.4f} coverage={best_pr['coverage']:.4f}"
-        )
-        summary_lines.append(
-            f"- {label}: paper_5feat best_by_precision@0.90={best_prec['model']} "
-            f"precision@0.90={best_prec['precision_at_recall_0_90']:.4f} pr_lift={best_prec['pr_lift']:.4f} "
-            f"coverage={best_prec['coverage']:.4f}"
-        )
+        best_pr = best_by_metric(paper, "pr_lift")
+        if best_pr is None:
+            summary_lines.append(f"- {label}: insufficient data for metric pr_lift")
+        else:
+            summary_lines.append(
+                f"- {label}: paper_5feat best_by_pr_lift={best_pr['model']} pr_lift={fmt(best_pr['pr_lift'])} "
+                f"precision@0.90={fmt(best_pr['precision_at_recall_0_90'])} coverage={fmt(best_pr['coverage'])}"
+            )
+        best_prec = best_by_metric(paper, "precision_at_recall_0_90")
+        if best_prec is None:
+            summary_lines.append(f"- {label}: insufficient data for metric precision_at_recall_0_90")
+        else:
+            summary_lines.append(
+                f"- {label}: paper_5feat best_by_precision@0.90={best_prec['model']} "
+                f"precision@0.90={fmt(best_prec['precision_at_recall_0_90'])} pr_lift={fmt(best_prec['pr_lift'])} "
+                f"coverage={fmt(best_prec['coverage'])}"
+            )
 
         if behav.empty:
             summary_lines.append(f"- {label}: behaviour_only runs missing; cannot compare.")
@@ -247,7 +287,12 @@ def main():
 
         # Compare regimes using each regime's best-by-PR-Lift model for a consistent baseline.
         paper_best = best_pr
-        behav_best = behav.sort_values("pr_lift", ascending=False).iloc[0]
+        if paper_best is None:
+            continue
+        behav_best = best_by_metric(behav, "pr_lift")
+        if behav_best is None:
+            summary_lines.append(f"- {label}: insufficient data for metric pr_lift")
+            continue
         delta_pr = paper_best["pr_lift"] - behav_best["pr_lift"]
         delta_prec = paper_best["precision_at_recall_0_90"] - behav_best["precision_at_recall_0_90"]
         delta_cov = paper_best["coverage"] - behav_best["coverage"]
@@ -255,7 +300,7 @@ def main():
 
         summary_lines.append(
             f"- {label}: paper_5feat vs behaviour_only (best-by-pr_lift) "
-            f"ΔPR-Lift={delta_pr:+.4f} ΔPrecision@0.90={delta_prec:+.4f} ΔCoverage={delta_cov:+.4f}"
+            f"ΔPR-Lift={fmt_signed(delta_pr)} ΔPrecision@0.90={fmt_signed(delta_prec)} ΔCoverage={fmt_signed(delta_cov)}"
         )
 
     summary_lines.append(
@@ -276,7 +321,7 @@ def main():
             if corr is None:
                 continue
             summary_lines.append(
-                f"- Explainability stability (host-src_ip, {model}): spearman={corr:.4f}"
+                f"- Explainability stability (host-src_ip, {model}): spearman={fmt(corr)}"
             )
 
     # Interpretation bullets (host splits)
@@ -285,15 +330,21 @@ def main():
             return f"- {label}: insufficient runs to compare paper_5feat vs behaviour_only."
         delta_pr, delta_prec, _ = delta
         if delta_pr >= -0.02 and delta_prec >= -0.02:
-            return f"- {label}: paper_5feat is competitive on host split (ΔPR-Lift={delta_pr:+.4f}, ΔPrecision@0.90={delta_prec:+.4f})."
-        return f"- {label}: paper_5feat underperforms on host split (ΔPR-Lift={delta_pr:+.4f}, ΔPrecision@0.90={delta_prec:+.4f})."
+            return (
+                f"- {label}: paper_5feat is competitive on host split "
+                f"(ΔPR-Lift={fmt_signed(delta_pr)}, ΔPrecision@0.90={fmt_signed(delta_prec)})."
+            )
+        return (
+            f"- {label}: paper_5feat underperforms on host split "
+            f"(ΔPR-Lift={fmt_signed(delta_pr)}, ΔPrecision@0.90={fmt_signed(delta_prec)})."
+        )
 
     summary_lines.append(_interpret("host-src_ip", delta_cache.get("host-src_ip")))
     summary_lines.append(_interpret("host-dst_ip", delta_cache.get("host-dst_ip")))
     if "host-src_ip" in delta_cache and "host-dst_ip" in delta_cache:
         avg_pr = (delta_cache["host-src_ip"][0] + delta_cache["host-dst_ip"][0]) / 2.0
         summary_lines.append(
-            f"- host splits overall: average ΔPR-Lift={avg_pr:+.4f} (paper_5feat vs behaviour_only)."
+            f"- host splits overall: average ΔPR-Lift={fmt_signed(avg_pr)} (paper_5feat vs behaviour_only)."
         )
     else:
         summary_lines.append("- host splits overall: insufficient runs to compute average ΔPR-Lift.")

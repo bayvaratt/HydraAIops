@@ -12,6 +12,7 @@ models:
   - logreg
   - random_forest
   - lightgbm
+  - sklearn_gbdt
 explain:
   local_samples: 50
   random_state: 42
