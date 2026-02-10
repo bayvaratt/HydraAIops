@@ -4,6 +4,8 @@ ton_iot:
   path: data/ton_iot/ton_iot.csv
   label_col: label
   positive_label: 1
+  type_col: type
+  normal_type_value: normal
   timestamp_col: timestamp
   group_col: src_ip
   duration_col: duration

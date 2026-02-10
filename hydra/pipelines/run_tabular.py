@@ -28,6 +28,8 @@ import pandas as pd
 import yaml
 from sklearn.base import clone
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.preprocessing import LabelEncoder
 
 from hydra.data.io import config_to_dict, load_dataset
 from hydra.data.preprocess import apply_feature_spec, build_feature_spec, fit_preprocessor
@@ -108,6 +110,34 @@ def _format_model_comparison_table(metrics_df: pd.DataFrame) -> str:
     return table_df.to_string(index=False)
 
 
+def _format_type_comparison_table(metrics_df: pd.DataFrame) -> str:
+    display_map = {
+        "model": "model",
+        "type_accuracy_overall": "type_acc",
+        "attack_type_accuracy_e2e": "attack_acc",
+        "attack_type_accuracy_detected": "attack_acc_det",
+        "attack_type_f1_macro_detected": "attack_f1_macro",
+    }
+    available = [col for col in display_map if col in metrics_df.columns]
+    if len(available) <= 1:
+        return ""
+    table_df = metrics_df[available].copy()
+    if "attack_type_accuracy_e2e" in table_df.columns:
+        table_df = table_df.sort_values("attack_type_accuracy_e2e", ascending=False)
+    table_df = table_df.rename(columns={k: display_map[k] for k in available})
+
+    def _fmt_cell(val):
+        if isinstance(val, (int, float, np.floating)):
+            if np.isnan(val):
+                return "nan"
+            return f"{float(val):.4f}"
+        return "nan" if val is None else str(val)
+
+    for col in table_df.columns:
+        table_df[col] = table_df[col].map(_fmt_cell)
+    return table_df.to_string(index=False)
+
+
 def _assert_binary_labels(name: str, y: pd.Series) -> None:
     values = set(pd.Series(y).dropna().unique().tolist())
     if not values.issubset({0, 1}):
@@ -171,7 +201,7 @@ def _load_defaults(path: str) -> Dict:
         return yaml.safe_load(f)
 
 
-def run(args) -> None:
+def run(args) -> Dict[str, object]:
     defaults = _load_defaults(args.defaults)
     seed = args.seed if args.seed is not None else defaults["seed"]
     random.seed(seed)
@@ -293,6 +323,20 @@ def run(args) -> None:
         label_stats["test"]["n"], label_stats["test"]["n_pos"], label_stats["test"]["n_neg"],
     )
 
+    type_col = args.type_col or cfg.type_col
+    normal_type_value = (
+        args.normal_type_value
+        if args.normal_type_value is not None
+        else (cfg.normal_type_value if cfg.normal_type_value is not None else "normal")
+    )
+    two_stage_enabled = bool(type_col and type_col in df.columns)
+    type_series = None
+    if type_col and type_col not in df.columns:
+        logger.warning("type_col '%s' not found in dataset; two-stage disabled.", type_col)
+        two_stage_enabled = False
+    if two_stage_enabled:
+        type_series = df[type_col]
+
     # Identifier diagnostics: which categorical columns are included in features.
     categorical_cols = cfg.categorical_cols or []
     categorical_in_features = [c for c in categorical_cols if c in X_train_raw.columns]
@@ -327,6 +371,14 @@ def run(args) -> None:
         },
         "temporal_proxy_note": "row_order_proxy" if (split_strategy == "temporal" and temporal_missing) else None,
     }
+    if two_stage_enabled:
+        evaluation_meta["attack_type_audit"] = {
+            "type_col": type_col,
+            "normal_type_value": normal_type_value,
+            "train_type_counts": type_series.iloc[train_idx].value_counts(dropna=False).to_dict(),
+            "val_type_counts": type_series.iloc[val_idx].value_counts(dropna=False).to_dict(),
+            "test_type_counts": type_series.iloc[test_idx].value_counts(dropna=False).to_dict(),
+        }
     _write_evaluation_meta(run_dir, evaluation_meta)
 
     preprocessor = fit_preprocessor(X_train_raw, cat_cols, num_cols)
@@ -398,10 +450,162 @@ def run(args) -> None:
                 f"Duplicate leakage detected: rate={train_test_rate_by_test:.6f} threshold={float(args.duplicate_leakage_threshold):.6f}"
             )
 
+    type_train = type_test = None
+    attack_train_mask = attack_test_mask = None
+    attack_type_classes = None
+    majority_attack_type = None
+    if two_stage_enabled and type_series is not None:
+        type_train = type_series.iloc[train_idx].to_numpy()
+        type_test = type_series.iloc[test_idx].to_numpy()
+        attack_train_mask = type_train != normal_type_value
+        attack_test_mask = type_test != normal_type_value
+
+        attack_types_train = pd.Series(type_train[attack_train_mask]).dropna().unique().tolist()
+        attack_types_test = pd.Series(type_test[attack_test_mask]).dropna().unique().tolist()
+        overlap_types = sorted(set(attack_types_train) & set(attack_types_test))
+
+        if not overlap_types:
+            logger.warning("No overlapping attack types between train/test; two-stage metrics disabled.")
+            two_stage_enabled = False
+        else:
+            overlap_train_mask = attack_train_mask & np.isin(type_train, overlap_types)
+            overlap_test_mask = attack_test_mask & np.isin(type_test, overlap_types)
+            if not overlap_train_mask.any() or not overlap_test_mask.any():
+                logger.warning("Attack type overlap empty after filtering; two-stage metrics disabled.")
+                two_stage_enabled = False
+            else:
+                attack_train_mask = overlap_train_mask
+                attack_test_mask = overlap_test_mask
+                attack_type_classes = pd.Series(type_train[attack_train_mask]).dropna().unique().tolist()
+                majority_attack_type = (
+                    pd.Series(type_train[attack_train_mask]).value_counts(dropna=False).idxmax()
+                )
+                if "attack_type_audit" in evaluation_meta:
+                    evaluation_meta["attack_type_audit"].update(
+                        {
+                            "train_attack_types": sorted(set(attack_types_train)),
+                            "test_attack_types": sorted(set(attack_types_test)),
+                            "overlap_attack_types": overlap_types,
+                            "attack_type_eval_note": "two_stage_metrics_use_overlap_types",
+                        }
+                    )
+                _write_evaluation_meta(run_dir, evaluation_meta)
+
     models = args.models or defaults["models"]
     if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1" and "lightgbm" in models:
         logger.warning("HYDRA_DISABLE_LIGHTGBM=1; lightgbm slot will use sklearn_gbdt fallback")
     metrics_rows: List[Dict] = []
+
+    def _two_stage_metrics(model_name: str, scores_test, threshold: float) -> Dict[str, float | int | None]:
+        if not two_stage_enabled:
+            return {
+                "type_accuracy_overall": None,
+                "attack_type_accuracy_e2e": None,
+                "attack_type_accuracy_detected": None,
+                "attack_type_f1_macro_detected": None,
+                "attack_type_f1_weighted_detected": None,
+                "attack_detected_fraction": None,
+                "attack_type_support": None,
+            }
+        if attack_train_mask is None or type_test is None or attack_test_mask is None:
+            return {
+                "type_accuracy_overall": None,
+                "attack_type_accuracy_e2e": None,
+                "attack_type_accuracy_detected": None,
+                "attack_type_f1_macro_detected": None,
+                "attack_type_f1_weighted_detected": None,
+                "attack_detected_fraction": None,
+                "attack_type_support": None,
+            }
+
+        pred_attack = np.asarray(scores_test) >= threshold
+        type_pred_all = np.full(len(type_test), normal_type_value, dtype=object)
+
+        pred_attack_idx = np.flatnonzero(pred_attack)
+        if pred_attack_idx.size > 0:
+            if not attack_type_classes:
+                pred_types_attack = np.full(pred_attack_idx.size, normal_type_value, dtype=object)
+            elif len(attack_type_classes) < 2 or model_name in {"baseline_majority", "baseline_threshold"}:
+                pred_types_attack = np.full(pred_attack_idx.size, majority_attack_type, dtype=object)
+            else:
+                if model_name == "logreg":
+                    spec_model = build_logreg(seed)
+                elif model_name == "random_forest":
+                    spec_model = build_random_forest(seed)
+                elif model_name == "sklearn_gbdt":
+                    spec_model = build_sklearn_gbdt(seed)
+                elif model_name == "lightgbm":
+                    spec_model = build_lightgbm(seed)
+                else:
+                    spec_model = None
+
+                if spec_model is None:
+                    pred_types_attack = np.full(pred_attack_idx.size, majority_attack_type, dtype=object)
+                else:
+                    y_train_attack = type_train[attack_train_mask]
+                    label_encoder = LabelEncoder()
+                    label_encoder.fit(y_train_attack)
+                    if len(label_encoder.classes_) < 2:
+                        pred_types_attack = np.full(pred_attack_idx.size, majority_attack_type, dtype=object)
+                    else:
+                        X_train_attack = X_train_proc[attack_train_mask]
+                        X_pred_attack = X_test_proc[pred_attack_idx]
+                        model = clone(spec_model.model)
+                        model.fit(X_train_attack, label_encoder.transform(y_train_attack))
+                        pred_encoded = model.predict(X_pred_attack)
+                        pred_types_attack = label_encoder.inverse_transform(pred_encoded)
+            type_pred_all[pred_attack_idx] = pred_types_attack
+
+        type_accuracy_overall = accuracy_score(type_test, type_pred_all)
+
+        attack_support = int(attack_test_mask.sum())
+        if attack_support == 0:
+            return {
+                "type_accuracy_overall": type_accuracy_overall,
+                "attack_type_accuracy_e2e": None,
+                "attack_type_accuracy_detected": None,
+                "attack_type_f1_macro_detected": None,
+                "attack_type_f1_weighted_detected": None,
+                "attack_detected_fraction": None,
+                "attack_type_support": 0,
+            }
+
+        attack_true = type_test[attack_test_mask]
+        attack_pred_e2e = type_pred_all[attack_test_mask]
+        attack_type_accuracy_e2e = accuracy_score(attack_true, attack_pred_e2e)
+
+        detected_mask = pred_attack & attack_test_mask
+        attack_detected_fraction = float(detected_mask.sum() / max(attack_support, 1))
+        if detected_mask.any():
+            attack_true_detected = type_test[detected_mask]
+            attack_pred_detected = type_pred_all[detected_mask]
+            attack_type_accuracy_detected = accuracy_score(attack_true_detected, attack_pred_detected)
+            attack_type_f1_macro_detected = f1_score(
+                attack_true_detected,
+                attack_pred_detected,
+                average="macro",
+                zero_division=0,
+            )
+            attack_type_f1_weighted_detected = f1_score(
+                attack_true_detected,
+                attack_pred_detected,
+                average="weighted",
+                zero_division=0,
+            )
+        else:
+            attack_type_accuracy_detected = None
+            attack_type_f1_macro_detected = None
+            attack_type_f1_weighted_detected = None
+
+        return {
+            "type_accuracy_overall": type_accuracy_overall,
+            "attack_type_accuracy_e2e": attack_type_accuracy_e2e,
+            "attack_type_accuracy_detected": attack_type_accuracy_detected,
+            "attack_type_f1_macro_detected": attack_type_f1_macro_detected,
+            "attack_type_f1_weighted_detected": attack_type_f1_weighted_detected,
+            "attack_detected_fraction": attack_detected_fraction,
+            "attack_type_support": attack_support,
+        }
 
     def evaluate_model(
         model_name: str,
@@ -456,6 +660,7 @@ def run(args) -> None:
             scores_val = baseline_majority_scores(y_train, len(y_val))
             scores_test = baseline_majority_scores(y_train, len(y_test))
             row = evaluate_model(model_name, scores_val, scores_test)
+            row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
             metrics_rows.append(row)
             continue
 
@@ -470,6 +675,7 @@ def run(args) -> None:
             scores_val = baseline_threshold_scores(df.iloc[val_idx], colmap, logger)
             scores_test = baseline_threshold_scores(df.iloc[test_idx], colmap, logger)
             row = evaluate_model(model_name, scores_val, scores_test)
+            row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
             metrics_rows.append(row)
             continue
 
@@ -491,6 +697,7 @@ def run(args) -> None:
         scores_test = pipeline.predict_proba(X_test_raw)[:, 1]
 
         row = evaluate_model(spec_model.name, scores_val, scores_test, backend=spec_model.backend)
+        row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
         metrics_rows.append(row)
 
         if spec_model.name in {"random_forest", "lightgbm"}:
@@ -734,6 +941,9 @@ def run(args) -> None:
     table = _format_model_comparison_table(metrics_df)
     if table:
         logger.info("Model comparison:\n%s", table)
+    type_table = _format_type_comparison_table(metrics_df)
+    if type_table:
+        logger.info("Two-stage type comparison:\n%s", type_table)
 
     paper_missing_cols = spec.missing_required or []
 
@@ -752,6 +962,8 @@ def run(args) -> None:
         "split_strategy": split_strategy,
         "group_col": group_col_used,
         "timestamp_col": timestamp_col_used,
+        "type_col": type_col if two_stage_enabled else None,
+        "normal_type_value": normal_type_value if two_stage_enabled else None,
         "seed": seed,
         "run_id": run_id,
         "timestamp": timestamp,
@@ -765,6 +977,16 @@ def run(args) -> None:
     }
     with open(run_dir / "run_config.json", "w", encoding="utf-8") as f:
         json.dump(run_config, f, indent=2)
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "dataset": cfg.name,
+        "feature_regime": args.feature_regime,
+        "split_strategy": split_strategy,
+        "group_col": group_col_used,
+        "timestamp_col": timestamp_col_used,
+        "metrics_df": metrics_df,
+    }
 
 
 def main():
@@ -784,6 +1006,8 @@ def main():
     parser.add_argument("--permutation_repeats", type=int, default=3)
     parser.add_argument("--duplicate_leakage_threshold", type=float, default=0.001)
     parser.add_argument("--fail_on_duplicate_leakage", action="store_true")
+    parser.add_argument("--type_col", default=None, help="Attack type column for two-stage classification")
+    parser.add_argument("--normal_type_value", default=None, help="Value representing benign in type_col")
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
     parser.add_argument("--models", nargs="+", default=None)
