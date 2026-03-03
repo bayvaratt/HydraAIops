@@ -44,6 +44,11 @@ OUTPUT_COLS = [
     "recall_at_0_90",
     "f1_at_0_90",
     "coverage",
+    "type_accuracy_overall",
+    "attack_type_f1_macro_detected",
+    "attack_type_f1_weighted_detected",
+    "attack_detected_fraction",
+    "attack_type_support",
     "n_rows_loaded",
     "n_rows_used",
     "commit_hash",
@@ -174,6 +179,11 @@ def load_run(run_dir: Path, missing_log: list[str]) -> list[dict]:
                     "recall_at_0_90": _safe_float(raw.get("recall_test_at_recall_0_90")),
                     "f1_at_0_90": _safe_float(raw.get("f1_test_at_recall_0_90")),
                     "coverage": _safe_float(raw.get("coverage")),
+                    "type_accuracy_overall": _safe_float(raw.get("type_accuracy_overall")),
+                    "attack_type_f1_macro_detected": _safe_float(raw.get("attack_type_f1_macro_detected")),
+                    "attack_type_f1_weighted_detected": _safe_float(raw.get("attack_type_f1_weighted_detected")),
+                    "attack_detected_fraction": _safe_float(raw.get("attack_detected_fraction")),
+                    "attack_type_support": _safe_int(raw.get("attack_type_support")),
                     "n_rows_loaded": repro.get("n_rows_loaded"),
                     "n_rows_used": repro.get("n_rows_used"),
                     "commit_hash": commit_hash,
@@ -182,6 +192,16 @@ def load_run(run_dir: Path, missing_log: list[str]) -> list[dict]:
                     "run_dir": str(run_dir),
                 }
             )
+            # Pass through per-class type columns (f1_<type>_detected, etc.)
+            row = rows[-1]
+            for k, v in raw.items():
+                if k in row:
+                    continue
+                if k.endswith("_detected") and (
+                    k.startswith("f1_") or k.startswith("precision_")
+                    or k.startswith("recall_") or k.startswith("support_")
+                ):
+                    row[k] = (_safe_int(v) if k.startswith("support_") else _safe_float(v))
     return rows
 
 
@@ -313,12 +333,21 @@ def main() -> None:
 
     df = pd.DataFrame(all_rows)
 
-    # Ensure all expected columns exist (fill with None if absent)
+    # Ensure all fixed columns exist (fill with None if absent)
     for col in OUTPUT_COLS:
         if col not in df.columns:
             df[col] = None
 
-    df = df[OUTPUT_COLS].sort_values("pr_auc", ascending=False, na_position="last")
+    # Collect any per-class type columns present in the data
+    per_class_cols = sorted(
+        c for c in df.columns
+        if c not in OUTPUT_COLS and c.endswith("_detected") and (
+            c.startswith("f1_") or c.startswith("precision_")
+            or c.startswith("recall_") or c.startswith("support_")
+        )
+    )
+    all_cols = [c for c in OUTPUT_COLS if c in df.columns] + per_class_cols
+    df = df[all_cols].sort_values("pr_auc", ascending=False, na_position="last")
 
     # Write outputs
     csv_path = out_dir / "results_summary.csv"

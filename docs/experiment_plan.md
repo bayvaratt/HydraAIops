@@ -83,6 +83,16 @@ features and are unaffected by feature selection).
 | Recall @ threshold (0.90 target) | `recall_at_0_90` | |
 | F1 @ threshold (0.90 recall target) | `f1_at_0_90` | |
 | Coverage (fraction predicted positive) | `coverage` | |
+| Type accuracy (stage 2, e2e) | `type_accuracy_overall` | |
+| Type F1 macro (stage 2) | `attack_type_f1_macro_detected` | **Yes (stage 2)** |
+| Type F1 weighted (stage 2) | `attack_type_f1_weighted_detected` | |
+| Attack detection rate | `attack_detected_fraction` | |
+| Per-class F1 (stage 2) | `f1_{type}_detected` | |
+| Per-class precision (stage 2) | `precision_{type}_detected` | |
+| Per-class recall (stage 2) | `recall_{type}_detected` | |
+
+Stage-2 metrics are produced when `--type_col type --normal_type_value normal` is passed.
+The pipeline first detects attacks (stage 1 binary), then classifies detected attacks by type (stage 2 multiclass).
 
 ---
 

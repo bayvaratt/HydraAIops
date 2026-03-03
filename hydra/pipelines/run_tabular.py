@@ -30,7 +30,7 @@ from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import RFE, mutual_info_classif
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder
 
 from hydra.data.io import config_to_dict, load_dataset
@@ -797,11 +797,27 @@ def run(args) -> Dict[str, object]:
             unknown_fraction_attack_detected = float(
                 np.mean(np.asarray(attack_pred_detected) == "unknown")
             )
+            report = classification_report(
+                attack_true_detected,
+                attack_pred_detected,
+                output_dict=True,
+                zero_division=0,
+            )
+            per_class_metrics: dict = {}
+            for cls, cls_m in report.items():
+                if cls in ("accuracy", "macro avg", "weighted avg"):
+                    continue
+                safe = cls.replace(" ", "_").replace("/", "_")
+                per_class_metrics[f"f1_{safe}_detected"]        = float(cls_m["f1-score"])
+                per_class_metrics[f"precision_{safe}_detected"] = float(cls_m["precision"])
+                per_class_metrics[f"recall_{safe}_detected"]    = float(cls_m["recall"])
+                per_class_metrics[f"support_{safe}_detected"]   = int(cls_m["support"])
         else:
             attack_type_accuracy_detected = None
             attack_type_f1_macro_detected = None
             attack_type_f1_weighted_detected = None
             unknown_fraction_attack_detected = None
+            per_class_metrics = {}
 
         return {
             "type_accuracy_overall": type_accuracy_overall,
@@ -812,6 +828,7 @@ def run(args) -> Dict[str, object]:
             "attack_detected_fraction": attack_detected_fraction,
             "attack_type_support": attack_support,
             "unknown_fraction_attack_detected": unknown_fraction_attack_detected,
+            **per_class_metrics,
         }
 
     def evaluate_model(

@@ -119,13 +119,12 @@ for SPLIT in "${SPLITS[@]}"; do
             SPLIT_ARGS=(--timestamp_col "${TIMESTAMP_COL}")
             ;;
         group_type_stratified)
-            SPLIT_ARGS=(
-                --group_col "${GROUP_COL}"
-                --type_col "${TYPE_COL}"
-                --normal_type_value "${NORMAL_TYPE}"
-            )
+            SPLIT_ARGS=(--group_col "${GROUP_COL}")
             ;;
     esac
+
+    # Two-stage type classification args (applied to all splits)
+    declare -a TYPE_ARGS=(--type_col "${TYPE_COL}" --normal_type_value "${NORMAL_TYPE}")
 
     # Optional max_rows arg
     declare -a MAX_ROWS_ARG=()
@@ -140,6 +139,7 @@ for SPLIT in "${SPLITS[@]}"; do
             --feature_regime "${FEATURE_REGIME}" \
             --split_strategy "${SPLIT}" \
             "${SPLIT_ARGS[@]}" \
+            "${TYPE_ARGS[@]}" \
             --seed "${SEED}" \
             --models "${BASE_MODELS[@]}" \
             --feature_selection none \
@@ -154,6 +154,7 @@ for SPLIT in "${SPLITS[@]}"; do
             --feature_regime "${FEATURE_REGIME}" \
             --split_strategy "${SPLIT}" \
             "${SPLIT_ARGS[@]}" \
+            "${TYPE_ARGS[@]}" \
             --seed "${SEED}" \
             --models "${ML_MODELS[@]}" \
             --feature_selection none \
@@ -169,6 +170,7 @@ for SPLIT in "${SPLITS[@]}"; do
                 --feature_regime "${FEATURE_REGIME}" \
                 --split_strategy "${SPLIT}" \
                 "${SPLIT_ARGS[@]}" \
+                "${TYPE_ARGS[@]}" \
                 --seed "${SEED}" \
                 --models "${ML_MODELS[@]}" \
                 --feature_selection mutual_info \
