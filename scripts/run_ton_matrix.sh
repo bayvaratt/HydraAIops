@@ -16,10 +16,10 @@
 # =============================================================================
 set -euo pipefail
 
-# ---- Bash version guard (bash 4+ required for arrays with set -u) ----------
-if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-    echo "ERROR: bash 4+ is required (found ${BASH_VERSION})." >&2
-    echo "       On macOS: brew install bash && hash -r" >&2
+# ---- Bash version guard (3.2+ required; empty-array set -u handled inline) --
+if [[ "${BASH_VERSINFO[0]}" -lt 3 ]] || \
+   ([[ "${BASH_VERSINFO[0]}" -eq 3 ]] && [[ "${BASH_VERSINFO[1]}" -lt 2 ]]); then
+    echo "ERROR: bash 3.2+ is required (found ${BASH_VERSION})." >&2
     exit 1
 fi
 
