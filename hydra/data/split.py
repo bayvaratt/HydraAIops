@@ -38,6 +38,25 @@ def _has_both_classes(y: pd.Series, idx: np.ndarray) -> bool:
     return y.iloc[idx].nunique(dropna=True) >= 2
 
 
+def _check_split_invariants(
+    y: "pd.Series | None",
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    test_idx: np.ndarray,
+    logger,
+) -> None:
+    """Fail-fast post-split checks: non-empty splits, no NaN labels (if y given), binary class warning."""
+    for name, idx in [("train", train_idx), ("val", val_idx), ("test", test_idx)]:
+        assert len(idx) > 0, f"Split '{name}' is empty after splitting"
+        if y is not None:
+            nan_count = int(y.iloc[idx].isna().sum())
+            assert nan_count == 0, f"Split '{name}' has {nan_count} NaN labels"
+            if not _has_both_classes(y, idx):
+                logger.warning(
+                    "Split '%s' does not contain both classes; downstream evaluation may be degenerate.", name
+                )
+
+
 def _group_label_bins(groups: pd.Series, y: pd.Series) -> pd.DataFrame:
     group_means = y.groupby(groups).mean()
     bins = []
@@ -98,6 +117,7 @@ def split_host(
     val_size: float,
     seed: int,
     logger,
+    split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if group_col not in df.columns:
         raise KeyError(f"Group column '{group_col}' not found in dataset")
@@ -163,6 +183,8 @@ def split_host(
         )
 
     check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
+    if split_assertions:
+        _check_split_invariants(y, train_idx, val_idx, test_idx, logger)
     return train_idx, val_idx, test_idx
 
 
@@ -173,6 +195,7 @@ def split_temporal(
     val_frac: float,
     test_frac: float,
     logger,
+    split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not timestamp_col or timestamp_col not in df.columns:
         logger.warning("Timestamp column missing; using row order as temporal proxy.")
@@ -190,6 +213,8 @@ def split_temporal(
     test_idx = order[n_train + n_val:]
 
     logger.info("Temporal split sizes: train=%d val=%d test=%d", len(train_idx), len(val_idx), len(test_idx))
+    if split_assertions:
+        _check_split_invariants(None, train_idx, val_idx, test_idx, logger)
     return train_idx, val_idx, test_idx
 
 
@@ -200,6 +225,7 @@ def split_stratified(
     val_size: float,
     seed: int,
     logger,
+    split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
     train_val_idx, test_idx = next(sss.split(df, y))
@@ -211,6 +237,8 @@ def split_stratified(
     val_idx = train_val_idx[val_idx]
 
     logger.warning("Stratified split is NOT deployment-realistic and is provided only as a naive baseline.")
+    if split_assertions:
+        _check_split_invariants(y, train_idx, val_idx, test_idx, logger)
     return train_idx, val_idx, test_idx
 
 
@@ -223,6 +251,7 @@ def split_stratified_by_column(
     logger,
     min_count: int = 1,
     other_label: str = "__other__",
+    split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if stratify_col not in df.columns:
         raise KeyError(f"Stratify column '{stratify_col}' not found in dataset")
@@ -258,6 +287,8 @@ def split_stratified_by_column(
         "Type-stratified split uses '%s' to balance classes across splits; this is not deployment-realistic.",
         stratify_col,
     )
+    if split_assertions:
+        _check_split_invariants(None, train_idx, val_idx, test_idx, logger)
     return train_idx, val_idx, test_idx
 
 
@@ -272,6 +303,7 @@ def split_group_stratified_by_label(
     logger,
     required_labels: set | None = None,
     max_attempts: int = 200,
+    split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if group_col not in df.columns:
         raise KeyError(f"Group column '{group_col}' not found in dataset")
@@ -322,6 +354,8 @@ def split_group_stratified_by_label(
                 group_col,
             )
             check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
+            if split_assertions:
+                _check_split_invariants(y, train_idx, val_idx, test_idx, logger)
             return train_idx, val_idx, test_idx
 
     raise RuntimeError(

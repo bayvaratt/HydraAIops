@@ -235,6 +235,28 @@ def _git_commit_hash() -> str:
         return "unknown"
 
 
+def _git_dirty() -> bool:
+    """Returns True if the working tree has uncommitted changes."""
+    try:
+        out = subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.DEVNULL)
+        return bool(out.strip())
+    except Exception:
+        return False
+
+
+def _dataset_fingerprint(path: str) -> str:
+    """Stable fingerprint of the raw data file: SHA-256 of resolved path + size + mtime."""
+    try:
+        p = Path(path)
+        if not p.exists():
+            return "file_not_found"
+        stat = p.stat()
+        content = f"{p.resolve()}:{stat.st_size}:{stat.st_mtime}"
+        return hashlib.sha256(content.encode()).hexdigest()
+    except Exception:
+        return "unknown"
+
+
 def _package_versions() -> Dict[str, str]:
     import sklearn
     import pandas
@@ -275,6 +297,7 @@ def _load_defaults(path: str) -> Dict:
 def run(args) -> Dict[str, object]:
     defaults = _load_defaults(args.defaults)
     seed = args.seed if args.seed is not None else defaults["seed"]
+    split_assertions = bool(defaults.get("split_assertions", True))
     random.seed(seed)
     np.random.seed(seed)
 
@@ -289,6 +312,7 @@ def run(args) -> Dict[str, object]:
         logger.warning("HYDRA_DISABLE_LIGHTGBM=1; LightGBM will fall back to xgboost/sklearn.")
 
     df, cfg = load_dataset(args.datasets, args.dataset)
+    n_rows_loaded = len(df)  # record before any subsampling
 
     if args.max_rows:
         df = df.sample(n=min(len(df), args.max_rows), random_state=seed)
@@ -312,6 +336,7 @@ def run(args) -> Dict[str, object]:
             val_size=defaults["split"]["val_size"],
             seed=seed,
             logger=logger,
+            split_assertions=split_assertions,
         )
     elif split_strategy == "temporal":
         timestamp_col = args.timestamp_col or cfg.timestamp_col
@@ -327,6 +352,7 @@ def run(args) -> Dict[str, object]:
             defaults["split"]["temporal"]["val_frac"],
             defaults["split"]["temporal"]["test_frac"],
             logger=logger,
+            split_assertions=split_assertions,
         )
     elif split_strategy == "stratified":
         train_idx, val_idx, test_idx = split_stratified(
@@ -336,6 +362,7 @@ def run(args) -> Dict[str, object]:
             val_size=defaults["split"]["val_size"],
             seed=seed,
             logger=logger,
+            split_assertions=split_assertions,
         )
     elif split_strategy == "type_stratified":
         type_col = args.type_col or cfg.type_col
@@ -348,6 +375,7 @@ def run(args) -> Dict[str, object]:
             val_size=defaults["split"]["val_size"],
             seed=seed,
             logger=logger,
+            split_assertions=split_assertions,
         )
     elif split_strategy == "group_type_stratified":
         group_col = args.group_col or cfg.group_col
@@ -378,6 +406,7 @@ def run(args) -> Dict[str, object]:
             seed=seed,
             logger=logger,
             required_labels=required_labels,
+            split_assertions=split_assertions,
         )
     else:
         raise ValueError(f"Unknown split strategy: {split_strategy}")
@@ -459,6 +488,25 @@ def run(args) -> Dict[str, object]:
         logger.warning("group_col '%s' is present in features; host split may leak identifiers.", group_col_used)
 
     evaluation_meta = {
+        "reproducibility": {
+            "git_commit_hash": _git_commit_hash(),
+            "git_dirty": _git_dirty(),
+            "config_snapshot": config_to_dict(cfg),
+            "dataset_fingerprint": _dataset_fingerprint(cfg.path),
+            "n_rows_loaded": n_rows_loaded,
+            "n_rows_used": len(df),
+            "split_params": {
+                "strategy": split_strategy,
+                "group_col": group_col_used,
+                "timestamp_col": timestamp_col_used,
+                "test_size": defaults["split"]["test_size"],
+                "val_size": defaults["split"]["val_size"],
+                "feature_selection": args.feature_selection,
+                "feature_selection_k": args.feature_selection_k,
+                "type_unknown_threshold": float(args.type_unknown_threshold),
+            },
+            "seed": seed,
+        },
         "split_label_counts": label_stats,
         "duplicate_leakage_audit": {
             "train_val_overlap_rate_definition": "by_val",
