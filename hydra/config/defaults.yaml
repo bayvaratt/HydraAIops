@@ -1,11 +1,11 @@
 seed: 42
 split:
-  test_size: 0.2
-  val_size: 0.2
+  test_size: 0.15
+  val_size: 0.15
   temporal:
-    train_frac: 0.6
-    val_frac: 0.2
-    test_frac: 0.2
+    train_frac: 0.7
+    val_frac: 0.15
+    test_frac: 0.15
 models:
   - baseline_majority
   - baseline_threshold

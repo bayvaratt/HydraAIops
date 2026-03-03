@@ -212,3 +212,119 @@ def split_stratified(
 
     logger.warning("Stratified split is NOT deployment-realistic and is provided only as a naive baseline.")
     return train_idx, val_idx, test_idx
+
+
+def split_stratified_by_column(
+    df: pd.DataFrame,
+    stratify_col: str,
+    test_size: float,
+    val_size: float,
+    seed: int,
+    logger,
+    min_count: int = 1,
+    other_label: str = "__other__",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if stratify_col not in df.columns:
+        raise KeyError(f"Stratify column '{stratify_col}' not found in dataset")
+    labels = df[stratify_col].astype("object").where(df[stratify_col].notna(), "__missing__")
+    value_counts = labels.value_counts(dropna=False)
+    rare = value_counts[value_counts < min_count].index.tolist()
+    if rare:
+        logger.warning(
+            "Stratify column '%s' has rare classes (<%d); grouping into '%s': %s",
+            stratify_col,
+            min_count,
+            other_label,
+            rare,
+        )
+        labels = labels.where(~labels.isin(rare), other_label)
+        value_counts = labels.value_counts(dropna=False)
+    if value_counts.min() < 2:
+        raise RuntimeError(
+            f"Stratify column '{stratify_col}' has classes with <2 samples after grouping; "
+            "cannot stratify reliably."
+        )
+
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    train_val_idx, test_idx = next(sss.split(df, labels))
+
+    val_fraction_of_train = val_size / (1.0 - test_size)
+    sss2 = StratifiedShuffleSplit(n_splits=1, test_size=val_fraction_of_train, random_state=seed)
+    train_idx, val_idx = next(sss2.split(df.iloc[train_val_idx], labels.iloc[train_val_idx]))
+    train_idx = train_val_idx[train_idx]
+    val_idx = train_val_idx[val_idx]
+
+    logger.warning(
+        "Type-stratified split uses '%s' to balance classes across splits; this is not deployment-realistic.",
+        stratify_col,
+    )
+    return train_idx, val_idx, test_idx
+
+
+def split_group_stratified_by_label(
+    df: pd.DataFrame,
+    y: pd.Series,
+    group_col: str,
+    label_col: str,
+    test_size: float,
+    val_size: float,
+    seed: int,
+    logger,
+    required_labels: set | None = None,
+    max_attempts: int = 200,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if group_col not in df.columns:
+        raise KeyError(f"Group column '{group_col}' not found in dataset")
+    if label_col not in df.columns:
+        raise KeyError(f"Label column '{label_col}' not found in dataset")
+
+    groups = df[group_col]
+    labels = df[label_col].astype("object").where(df[label_col].notna(), "__missing__")
+    all_labels = set(labels.dropna().unique().tolist())
+    required = set(required_labels) if required_labels is not None else set(all_labels)
+    if not required:
+        raise RuntimeError("No required labels provided for group-stratified split.")
+
+    unique_groups = groups.unique()
+    n_total = len(unique_groups)
+    n_test = int(round(n_total * test_size))
+    n_val = int(round(n_total * val_size))
+    n_test = max(n_test, 1)
+    n_val = max(n_val, 1)
+    n_train = max(n_total - n_test - n_val, 1)
+
+    def _labels_in(idx: np.ndarray) -> set:
+        return set(labels.iloc[idx].dropna().unique().tolist())
+
+    for attempt in range(max_attempts):
+        rng = np.random.default_rng(seed + attempt)
+        shuffled = rng.permutation(unique_groups)
+        train_groups = shuffled[:n_train]
+        val_groups = shuffled[n_train:n_train + n_val]
+        test_groups = shuffled[n_train + n_val:n_train + n_val + n_test]
+
+        train_idx = np.flatnonzero(groups.isin(train_groups))
+        val_idx = np.flatnonzero(groups.isin(val_groups))
+        test_idx = np.flatnonzero(groups.isin(test_groups))
+
+        if len(train_idx) == 0 or len(val_idx) == 0 or len(test_idx) == 0:
+            continue
+
+        if not (_has_both_classes(y, train_idx) and _has_both_classes(y, val_idx) and _has_both_classes(y, test_idx)):
+            continue
+
+        labels_train = _labels_in(train_idx)
+        labels_test = _labels_in(test_idx)
+        if required.issubset(labels_train) and required.issubset(labels_test):
+            logger.warning(
+                "Group-stratified split uses '%s' with groups '%s'; not deployment-realistic.",
+                label_col,
+                group_col,
+            )
+            check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
+            return train_idx, val_idx, test_idx
+
+    raise RuntimeError(
+        "Group-stratified split failed to include all required labels in both train and test "
+        f"after {max_attempts} attempts. Consider relaxing constraints."
+    )

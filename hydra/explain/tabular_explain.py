@@ -16,6 +16,18 @@ def _get_preprocessor(pipeline):
     return pipeline.named_steps["prep"]
 
 
+def _get_selector(pipeline):
+    return pipeline.named_steps.get("select")
+
+
+def _transform_for_model(pipeline, X):
+    X_trans = _get_preprocessor(pipeline).transform(X)
+    selector = _get_selector(pipeline)
+    if selector is not None:
+        X_trans = selector.transform(X_trans)
+    return X_trans
+
+
 def save_global_importance(
     pipeline,
     X_val: pd.DataFrame,
@@ -36,7 +48,7 @@ def save_global_importance(
             return
 
     logger.info("Using permutation importance for global feature importance")
-    X_trans = _get_preprocessor(pipeline).transform(X_val)
+    X_trans = _transform_for_model(pipeline, X_val)
     result = permutation_importance(
         model,
         X_trans,
@@ -64,8 +76,7 @@ def save_local_explanations(
     X_sample = X_val.iloc[sample_idx]
 
     model = _get_model(pipeline)
-    prep = _get_preprocessor(pipeline)
-    X_trans = prep.transform(X_sample)
+    X_trans = _transform_for_model(pipeline, X_sample)
 
     try:
         import shap  # noqa: F401

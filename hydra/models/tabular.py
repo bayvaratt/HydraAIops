@@ -44,6 +44,30 @@ def build_sklearn_gbdt(random_state: int) -> ModelSpec:
     return ModelSpec(name="sklearn_gbdt", backend="sklearn", model=model)
 
 
+def _build_xgboost_model(random_state: int):
+    import xgboost as xgb
+
+    return xgb.XGBClassifier(
+        n_estimators=400,
+        learning_rate=0.05,
+        max_depth=8,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=random_state,
+        n_jobs=-1,
+    )
+
+
+def build_xgboost(random_state: int) -> ModelSpec:
+    try:
+        model = _build_xgboost_model(random_state)
+        return ModelSpec(name="xgboost", backend="xgboost", model=model)
+    except Exception as exc:
+        raise RuntimeError("xgboost is not available; install xgboost to use this model.") from exc
+
+
 def build_lightgbm(random_state: int) -> ModelSpec:
     if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
         spec = build_sklearn_gbdt(random_state)
@@ -66,19 +90,7 @@ def build_lightgbm(random_state: int) -> ModelSpec:
         pass
 
     try:
-        import xgboost as xgb
-
-        model = xgb.XGBClassifier(
-            n_estimators=400,
-            learning_rate=0.05,
-            max_depth=8,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            random_state=random_state,
-            n_jobs=-1,
-        )
+        model = _build_xgboost_model(random_state)
         return ModelSpec(name="lightgbm", backend="xgboost", model=model)
     except Exception:
         pass

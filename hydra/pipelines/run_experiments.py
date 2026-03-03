@@ -37,6 +37,9 @@ def main():
     parser.add_argument("--fail_on_duplicate_leakage", action="store_true")
     parser.add_argument("--type_col", default=None)
     parser.add_argument("--normal_type_value", default=None)
+    parser.add_argument("--feature_selection", default="none")
+    parser.add_argument("--feature_selection_k", type=int, default=None)
+    parser.add_argument("--type_unknown_threshold", type=float, default=0.0)
     parser.add_argument("--include_paper_comparison", action="store_true")
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
@@ -97,6 +100,9 @@ def main():
                 fail_on_duplicate_leakage=args.fail_on_duplicate_leakage,
                 type_col=args.type_col,
                 normal_type_value=args.normal_type_value,
+                feature_selection=args.feature_selection,
+                feature_selection_k=args.feature_selection_k,
+                type_unknown_threshold=args.type_unknown_threshold,
                 datasets=args.datasets,
                 defaults=args.defaults,
                 models=None,

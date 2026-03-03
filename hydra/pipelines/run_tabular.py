@@ -26,14 +26,22 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import RFE, mutual_info_classif
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import LabelEncoder
 
 from hydra.data.io import config_to_dict, load_dataset
 from hydra.data.preprocess import apply_feature_spec, build_feature_spec, fit_preprocessor
-from hydra.data.split import split_host, split_stratified, split_temporal
+from hydra.data.split import (
+    split_group_stratified_by_label,
+    split_host,
+    split_stratified,
+    split_stratified_by_column,
+    split_temporal,
+)
 from hydra.eval.metrics import (
     compute_brier,
     compute_ks_statistic,
@@ -55,7 +63,7 @@ from hydra.eval.thresholds import (
 )
 from hydra.explain.tabular_explain import save_global_importance, save_local_explanations
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
-from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt
+from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt, build_xgboost
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
@@ -87,6 +95,8 @@ def _format_model_comparison_table(metrics_df: pd.DataFrame) -> str:
         "pr_lift": "pr_lift",
         "roc_auc": "roc_auc",
         "precision_test_at_recall_0_90": "precision@0.90",
+        "recall_test_at_recall_0_90": "recall@0.90",
+        "f1_test_at_recall_0_90": "f1@0.90",
         "fpr_at_recall_0_90": "fpr@0.90",
         "coverage": "coverage",
     }
@@ -117,6 +127,8 @@ def _format_type_comparison_table(metrics_df: pd.DataFrame) -> str:
         "attack_type_accuracy_e2e": "attack_acc",
         "attack_type_accuracy_detected": "attack_acc_det",
         "attack_type_f1_macro_detected": "attack_f1_macro",
+        "attack_type_f1_weighted_detected": "attack_f1_weighted",
+        "unknown_fraction_attack_detected": "unk_frac",
     }
     available = [col for col in display_map if col in metrics_df.columns]
     if len(available) <= 1:
@@ -136,6 +148,65 @@ def _format_type_comparison_table(metrics_df: pd.DataFrame) -> str:
     for col in table_df.columns:
         table_df[col] = table_df[col].map(_fmt_cell)
     return table_df.to_string(index=False)
+
+
+class FixedFeatureSelector(BaseEstimator, TransformerMixin):
+    def __init__(self, indices: np.ndarray):
+        self.indices = np.asarray(indices, dtype=int)
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X[:, self.indices]
+
+
+def _select_feature_indices(
+    method: str,
+    k: int | None,
+    X_train,
+    y_train,
+    seed: int,
+    logger,
+) -> np.ndarray | None:
+    if method == "none":
+        return None
+    if not k or k <= 0:
+        logger.warning("feature_selection_k must be >0 when feature_selection is enabled; skipping.")
+        return None
+    n_features = X_train.shape[1]
+    if k >= n_features:
+        logger.warning("feature_selection_k >= n_features (%d); skipping.", n_features)
+        return None
+
+    if method == "mutual_info":
+        scores = mutual_info_classif(X_train, y_train, random_state=seed)
+        if np.all(np.isnan(scores)):
+            logger.warning("Mutual information returned all NaN scores; skipping feature selection.")
+            return None
+        return np.argsort(scores)[::-1][:k]
+    if method == "rfe":
+        logger.warning("RFE can be slow on high-dimensional data; consider mutual_info for speed.")
+        estimator = RandomForestClassifier(
+            n_estimators=150,
+            random_state=seed,
+            n_jobs=-1,
+        )
+        rfe = RFE(estimator=estimator, n_features_to_select=k, step=0.1)
+        rfe.fit(X_train, y_train)
+        return np.flatnonzero(rfe.support_)
+    if method == "model_importance":
+        estimator = RandomForestClassifier(
+            n_estimators=200,
+            random_state=seed,
+            n_jobs=-1,
+        )
+        estimator.fit(X_train, y_train)
+        scores = estimator.feature_importances_
+        return np.argsort(scores)[::-1][:k]
+
+    logger.warning("Unknown feature selection method '%s'; skipping.", method)
+    return None
 
 
 def _assert_binary_labels(name: str, y: pd.Series) -> None:
@@ -265,6 +336,48 @@ def run(args) -> Dict[str, object]:
             val_size=defaults["split"]["val_size"],
             seed=seed,
             logger=logger,
+        )
+    elif split_strategy == "type_stratified":
+        type_col = args.type_col or cfg.type_col
+        if not type_col:
+            raise ValueError("type_col must be provided for type_stratified split")
+        train_idx, val_idx, test_idx = split_stratified_by_column(
+            df,
+            type_col,
+            test_size=defaults["split"]["test_size"],
+            val_size=defaults["split"]["val_size"],
+            seed=seed,
+            logger=logger,
+        )
+    elif split_strategy == "group_type_stratified":
+        group_col = args.group_col or cfg.group_col
+        if not group_col:
+            raise ValueError("group_col must be provided for group_type_stratified split")
+        group_col_used = group_col
+        type_col = args.type_col or cfg.type_col
+        if not type_col:
+            raise ValueError("type_col must be provided for group_type_stratified split")
+        normal_type_value = (
+            args.normal_type_value
+            if args.normal_type_value is not None
+            else (cfg.normal_type_value if cfg.normal_type_value is not None else "normal")
+        )
+        type_series = df[type_col]
+        required_labels = set(type_series.dropna().unique().tolist())
+        if normal_type_value in required_labels:
+            required_labels.remove(normal_type_value)
+        if not required_labels:
+            raise RuntimeError("No attack types found for group_type_stratified split.")
+        train_idx, val_idx, test_idx = split_group_stratified_by_label(
+            df,
+            y,
+            group_col=group_col,
+            label_col=type_col,
+            test_size=defaults["split"]["test_size"],
+            val_size=defaults["split"]["val_size"],
+            seed=seed,
+            logger=logger,
+            required_labels=required_labels,
         )
     else:
         raise ValueError(f"Unknown split strategy: {split_strategy}")
@@ -450,6 +563,35 @@ def run(args) -> Dict[str, object]:
                 f"Duplicate leakage detected: rate={train_test_rate_by_test:.6f} threshold={float(args.duplicate_leakage_threshold):.6f}"
             )
 
+    feature_selector = None
+    selected_feature_names = None
+    if args.feature_selection != "none":
+        selected_idx = _select_feature_indices(
+            args.feature_selection,
+            args.feature_selection_k,
+            X_train_proc,
+            y_train,
+            seed,
+            logger,
+        )
+        if selected_idx is not None and selected_idx.size > 0:
+            feature_selector = FixedFeatureSelector(selected_idx)
+            X_train_proc = feature_selector.transform(X_train_proc)
+            X_val_proc = feature_selector.transform(X_val_proc)
+            X_test_proc = feature_selector.transform(X_test_proc)
+            try:
+                feature_names = preprocessor.get_feature_names_out()
+                selected_feature_names = [str(feature_names[i]) for i in selected_idx]
+            except Exception:
+                selected_feature_names = None
+            evaluation_meta["feature_selection"] = {
+                "method": args.feature_selection,
+                "k": int(args.feature_selection_k),
+                "n_selected": int(len(selected_idx)),
+                "selected_features": selected_feature_names,
+            }
+            _write_evaluation_meta(run_dir, evaluation_meta)
+
     type_train = type_test = None
     attack_train_mask = attack_test_mask = None
     attack_type_classes = None
@@ -506,6 +648,7 @@ def run(args) -> Dict[str, object]:
                 "attack_type_f1_weighted_detected": None,
                 "attack_detected_fraction": None,
                 "attack_type_support": None,
+                "unknown_fraction_attack_detected": None,
             }
         if attack_train_mask is None or type_test is None or attack_test_mask is None:
             return {
@@ -516,6 +659,7 @@ def run(args) -> Dict[str, object]:
                 "attack_type_f1_weighted_detected": None,
                 "attack_detected_fraction": None,
                 "attack_type_support": None,
+                "unknown_fraction_attack_detected": None,
             }
 
         pred_attack = np.asarray(scores_test) >= threshold
@@ -536,6 +680,8 @@ def run(args) -> Dict[str, object]:
                     spec_model = build_sklearn_gbdt(seed)
                 elif model_name == "lightgbm":
                     spec_model = build_lightgbm(seed)
+                elif model_name == "xgboost":
+                    spec_model = build_xgboost(seed)
                 else:
                     spec_model = None
 
@@ -552,8 +698,16 @@ def run(args) -> Dict[str, object]:
                         X_pred_attack = X_test_proc[pred_attack_idx]
                         model = clone(spec_model.model)
                         model.fit(X_train_attack, label_encoder.transform(y_train_attack))
-                        pred_encoded = model.predict(X_pred_attack)
-                        pred_types_attack = label_encoder.inverse_transform(pred_encoded)
+                        if args.type_unknown_threshold and hasattr(model, "predict_proba"):
+                            proba = model.predict_proba(X_pred_attack)
+                            max_proba = np.max(proba, axis=1)
+                            pred_encoded = np.argmax(proba, axis=1)
+                            pred_types_attack = label_encoder.inverse_transform(pred_encoded)
+                            pred_types_attack = np.asarray(pred_types_attack, dtype=object)
+                            pred_types_attack[max_proba < args.type_unknown_threshold] = "unknown"
+                        else:
+                            pred_encoded = model.predict(X_pred_attack)
+                            pred_types_attack = label_encoder.inverse_transform(pred_encoded)
             type_pred_all[pred_attack_idx] = pred_types_attack
 
         type_accuracy_overall = accuracy_score(type_test, type_pred_all)
@@ -592,10 +746,14 @@ def run(args) -> Dict[str, object]:
                 average="weighted",
                 zero_division=0,
             )
+            unknown_fraction_attack_detected = float(
+                np.mean(np.asarray(attack_pred_detected) == "unknown")
+            )
         else:
             attack_type_accuracy_detected = None
             attack_type_f1_macro_detected = None
             attack_type_f1_weighted_detected = None
+            unknown_fraction_attack_detected = None
 
         return {
             "type_accuracy_overall": type_accuracy_overall,
@@ -605,6 +763,7 @@ def run(args) -> Dict[str, object]:
             "attack_type_f1_weighted_detected": attack_type_f1_weighted_detected,
             "attack_detected_fraction": attack_detected_fraction,
             "attack_type_support": attack_support,
+            "unknown_fraction_attack_detected": unknown_fraction_attack_detected,
         }
 
     def evaluate_model(
@@ -630,6 +789,7 @@ def run(args) -> Dict[str, object]:
         )
         precision_val, recall_val = precision_recall_at_threshold(y_val_used, scores_val, threshold)
         precision_test, recall_test = precision_recall_at_threshold(y_test_used, scores_test, threshold)
+        f1_test = (2 * precision_test * recall_test) / max(precision_test + recall_test, 1e-12)
         fpr = fpr_at_threshold(y_test_used, scores_test, threshold)
         coverage = coverage_at_threshold(scores_test, threshold)
 
@@ -650,6 +810,7 @@ def run(args) -> Dict[str, object]:
             "recall_val_at_recall_0_90": recall_val,
             "precision_test_at_recall_0_90": precision_test,
             "recall_test_at_recall_0_90": recall_test,
+            "f1_test_at_recall_0_90": f1_test,
             "coverage": coverage,
         }
 
@@ -687,10 +848,16 @@ def run(args) -> Dict[str, object]:
             spec_model = build_sklearn_gbdt(seed)
         elif model_name == "lightgbm":
             spec_model = build_lightgbm(seed)
+        elif model_name == "xgboost":
+            spec_model = build_xgboost(seed)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
-        pipeline = Pipeline(steps=[("prep", clone(preprocessor)), ("model", spec_model.model)])
+        steps = [("prep", clone(preprocessor))]
+        if feature_selector is not None:
+            steps.append(("select", feature_selector))
+        steps.append(("model", spec_model.model))
+        pipeline = Pipeline(steps=steps)
         pipeline.fit(X_train_raw, y_train)
 
         scores_val = pipeline.predict_proba(X_val_raw)[:, 1]
@@ -704,7 +871,10 @@ def run(args) -> Dict[str, object]:
             explain_dir = run_dir / "explain" / spec_model.name
             explain_dir.mkdir(parents=True, exist_ok=True)
 
-            feature_names = pipeline.named_steps["prep"].get_feature_names_out()
+            if selected_feature_names is not None:
+                feature_names = selected_feature_names
+            else:
+                feature_names = pipeline.named_steps["prep"].get_feature_names_out()
             save_global_importance(
                 pipeline,
                 X_val_raw,
@@ -970,6 +1140,9 @@ def run(args) -> Dict[str, object]:
         "commit_hash": _git_commit_hash(),
         "package_versions": _package_versions(),
         "models": models,
+        "feature_selection": args.feature_selection,
+        "feature_selection_k": args.feature_selection_k,
+        "type_unknown_threshold": float(args.type_unknown_threshold),
         "label_permutation_probe": bool(args.label_permutation_probe),
         "permutation_repeats": int(args.permutation_repeats),
         "notes": " | ".join(notes),
@@ -997,7 +1170,11 @@ def main():
         required=True,
         choices=["behaviour_only", "operational", "identifier_inclusive", "paper_5feat"],
     )
-    parser.add_argument("--split_strategy", required=True, choices=["host", "temporal", "stratified"])
+    parser.add_argument(
+        "--split_strategy",
+        required=True,
+        choices=["host", "temporal", "stratified", "type_stratified", "group_type_stratified"],
+    )
     parser.add_argument("--group_col", default=None)
     parser.add_argument("--timestamp_col", default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -1011,6 +1188,19 @@ def main():
     parser.add_argument("--datasets", default="hydra/config/datasets.yaml")
     parser.add_argument("--defaults", default="hydra/config/defaults.yaml")
     parser.add_argument("--models", nargs="+", default=None)
+    parser.add_argument(
+        "--feature_selection",
+        default="none",
+        choices=["none", "mutual_info", "rfe", "model_importance"],
+        help="Optional feature selection method applied on training data only.",
+    )
+    parser.add_argument("--feature_selection_k", type=int, default=None)
+    parser.add_argument(
+        "--type_unknown_threshold",
+        type=float,
+        default=0.0,
+        help="If >0, stage-2 predicts 'unknown' when max attack-type prob < threshold.",
+    )
     args = parser.parse_args()
 
     run(args)
