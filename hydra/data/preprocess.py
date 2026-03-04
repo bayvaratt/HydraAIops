@@ -107,7 +107,13 @@ def build_feature_spec(
     num_cols = [c for c in num_cols if c != label_col]
 
     all_cols = list(dict.fromkeys(cat_cols + num_cols))
-    ip_cols = _match_cols(all_cols, ["ip", "addr", "address", "mac"])
+    # Exclude traffic-metric columns whose names happen to contain "ip"
+    # (e.g. src_ip_bytes, dst_ip_bytes are volume features, not identifiers)
+    _metric_suffixes = ("_bytes", "_pkts", "_packets", "_count", "_len")
+    ip_cols = [
+        c for c in _match_cols(all_cols, ["ip", "addr", "address", "mac"])
+        if not c.endswith(_metric_suffixes)
+    ]
     port_cols = _match_cols(all_cols, ["port"])
     service_cols = _match_cols(all_cols, ["service", "svc"])
     text_cols = [c for c in cat_cols if _is_text_col(train_df[c])]
@@ -135,6 +141,22 @@ def build_feature_spec(
         drop.update([c for c in high_card if c not in ip_cols and c not in port_cols])
         for c in port_cols:
             derived[f"{c}_bucket"] = c
+    elif regime == "core_flow":
+        # Top-14 MI features: 5 flow-volume numerics + 2 connection categoricals
+        # + 7 DNS categoricals. Selected by mutual-information analysis on TON_IoT.
+        _CORE_NUMERIC = [
+            "duration", "src_bytes", "dst_bytes", "src_pkts", "dst_pkts",
+        ]
+        _CORE_CATEGORICAL = [
+            "proto", "conn_state",
+            "dns_rejected", "dns_AA", "dns_RD", "dns_RA", "dns_query",
+            "dns_qclass", "dns_qtype",
+        ]
+        core = set(_CORE_NUMERIC + _CORE_CATEGORICAL)
+        drop.update(c for c in all_cols if c not in core)
+        missing = [c for c in core if c not in all_cols]
+        if missing:
+            logger.warning("core_flow: requested columns absent from data: %s", missing)
     else:
         raise ValueError(f"Unknown feature regime: {regime}")
 

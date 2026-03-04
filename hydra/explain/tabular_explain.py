@@ -61,6 +61,51 @@ def save_global_importance(
     df.sort_values("importance", ascending=False).to_csv(out_path, index=False)
 
 
+def save_type_shap(
+    model,
+    X_proc,
+    y_true,
+    label_encoder,
+    feature_names: List[str],
+    out_dir: Path,
+    logger,
+):
+    """Save per-class SHAP values for the stage-2 multiclass type classifier."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if hasattr(model, "feature_importances_") and len(model.feature_importances_) == len(feature_names):
+        df = pd.DataFrame({"feature": feature_names, "importance": model.feature_importances_})
+        df.sort_values("importance", ascending=False).to_csv(out_dir / "type_global_importance.csv", index=False)
+
+    X_arr = X_proc.toarray() if hasattr(X_proc, "toarray") else np.asarray(X_proc)
+    classes = label_encoder.classes_
+
+    try:
+        import shap
+
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_arr)
+
+        if isinstance(shap_values, list):
+            for i, cls in enumerate(classes):
+                safe = cls.replace(" ", "_").replace("/", "_")
+                df = pd.DataFrame(shap_values[i], columns=feature_names)
+                df["true_label"] = np.asarray(y_true)
+                df.to_csv(out_dir / f"type_shap_{safe}.csv", index=False)
+        elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+            for i, cls in enumerate(classes):
+                safe = cls.replace(" ", "_").replace("/", "_")
+                df = pd.DataFrame(shap_values[:, :, i], columns=feature_names)
+                df["true_label"] = np.asarray(y_true)
+                df.to_csv(out_dir / f"type_shap_{safe}.csv", index=False)
+        else:
+            logger.warning("Unexpected SHAP shape %s for type classifier; skipping per-class CSVs", np.shape(shap_values))
+
+        logger.info("Saved type classifier SHAP to %s", out_dir)
+    except Exception as e:
+        logger.warning("Type SHAP failed (%s); skipping", e)
+
+
 def save_local_explanations(
     pipeline,
     X_val: pd.DataFrame,

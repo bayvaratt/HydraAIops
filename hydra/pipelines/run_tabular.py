@@ -61,7 +61,7 @@ from hydra.eval.thresholds import (
     precision_recall_at_threshold,
     select_threshold_max_precision_at_recall,
 )
-from hydra.explain.tabular_explain import save_global_importance, save_local_explanations
+from hydra.explain.tabular_explain import save_global_importance, save_local_explanations, save_type_shap
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
 from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt, build_xgboost
 
@@ -686,7 +686,7 @@ def run(args) -> Dict[str, object]:
         logger.warning("HYDRA_DISABLE_LIGHTGBM=1; lightgbm slot will use sklearn_gbdt fallback")
     metrics_rows: List[Dict] = []
 
-    def _two_stage_metrics(model_name: str, scores_test, threshold: float) -> Dict[str, float | int | None]:
+    def _two_stage_metrics(model_name: str, scores_test, threshold: float, type_explain_dir=None, feat_names=None) -> Dict[str, float | int | None]:
         if not two_stage_enabled:
             return {
                 "type_accuracy_overall": None,
@@ -756,6 +756,17 @@ def run(args) -> Dict[str, object]:
                         else:
                             pred_encoded = model.predict(X_pred_attack)
                             pred_types_attack = label_encoder.inverse_transform(pred_encoded)
+
+                        if type_explain_dir is not None and feat_names is not None:
+                            save_type_shap(
+                                model,
+                                X_pred_attack,
+                                type_test[pred_attack_idx],
+                                label_encoder,
+                                list(feat_names),
+                                type_explain_dir,
+                                logger,
+                            )
             type_pred_all[pred_attack_idx] = pred_types_attack
 
         type_accuracy_overall = accuracy_score(type_test, type_pred_all)
@@ -929,14 +940,26 @@ def run(args) -> Dict[str, object]:
         scores_test = pipeline.predict_proba(X_test_raw)[:, 1]
 
         row = evaluate_model(spec_model.name, scores_val, scores_test, backend=spec_model.backend)
-        row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
+
+        _feat_names = None
+        _type_explain_dir = None
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt"}:
+            if selected_feature_names is not None:
+                _feat_names = list(selected_feature_names)
+            else:
+                _feat_names = list(pipeline.named_steps["prep"].get_feature_names_out())
+            _type_explain_dir = run_dir / "explain" / spec_model.name / "type_classifier"
+
+        row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"], type_explain_dir=_type_explain_dir, feat_names=_feat_names))
         metrics_rows.append(row)
 
-        if spec_model.name in {"random_forest", "lightgbm"}:
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt"}:
             explain_dir = run_dir / "explain" / spec_model.name
             explain_dir.mkdir(parents=True, exist_ok=True)
 
-            if selected_feature_names is not None:
+            if _feat_names is not None:
+                feature_names = _feat_names
+            elif selected_feature_names is not None:
                 feature_names = selected_feature_names
             else:
                 feature_names = pipeline.named_steps["prep"].get_feature_names_out()
@@ -1233,7 +1256,7 @@ def main():
     parser.add_argument(
         "--feature_regime",
         required=True,
-        choices=["behaviour_only", "operational", "identifier_inclusive", "paper_5feat"],
+        choices=["behaviour_only", "operational", "identifier_inclusive", "paper_5feat", "core_flow"],
     )
     parser.add_argument(
         "--split_strategy",
