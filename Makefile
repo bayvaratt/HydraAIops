@@ -27,7 +27,7 @@ else
   MAX_ROWS_ARG :=
 endif
 
-.PHONY: ton-matrix aggregate plots all-ton
+.PHONY: ton-matrix aggregate plots all-ton cross-dataset
 
 ## Run the full TON_IoT experiment matrix (36 runs)
 ton-matrix:
@@ -47,3 +47,17 @@ plots:
 
 ## End-to-end: matrix → aggregate → plots
 all-ton: ton-matrix aggregate plots
+
+## Cross-dataset generalisation (both directions)
+## Usage: make cross-dataset [MAX_ROWS=50000]
+cross-dataset:
+	$(PYTHON) -m hydra.pipelines.run_cross_dataset \
+		--source ton_iot --target cic_iot2023 \
+		--models logreg random_forest xgboost \
+		--seed 42 \
+		$(if $(MAX_ROWS),--max_rows_source $(MAX_ROWS) --max_rows_target $(MAX_ROWS),)
+	$(PYTHON) -m hydra.pipelines.run_cross_dataset \
+		--source cic_iot2023 --target ton_iot \
+		--models logreg random_forest xgboost \
+		--seed 42 \
+		$(if $(MAX_ROWS),--max_rows_source $(MAX_ROWS) --max_rows_target $(MAX_ROWS),)

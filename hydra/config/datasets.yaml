@@ -18,10 +18,8 @@ cic_iot2023:
   path: data/cic_iot2023/cic_iot2023.csv
   label_col: label
   positive_label: 1
-  timestamp_col: timestamp
-  group_col: src_ip
-  duration_col: duration
-  src_bytes_col: src_bytes
-  dst_bytes_col: dst_bytes
-  src_pkts_col: src_pkts
-  dst_pkts_col: dst_pkts
+  type_col: type
+  normal_type_value: BENIGN
+  # No src_ip/timestamp columns in CIC-IoT-2023; use stratified split
+  # Baseline threshold columns (closest available; no traditional flow stats)
+  src_pkts_col: number

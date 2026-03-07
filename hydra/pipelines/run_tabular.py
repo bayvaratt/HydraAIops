@@ -64,6 +64,7 @@ from hydra.eval.thresholds import (
 from hydra.explain.tabular_explain import save_global_importance, save_local_explanations, save_type_shap
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
 from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt, build_xgboost
+from hydra.models.deep import build_cnn_lstm
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
@@ -430,6 +431,16 @@ def run(args) -> Dict[str, object]:
     X_val_raw, _, _ = apply_feature_spec(df.iloc[val_idx], spec, label_col, logger)
     X_test_raw, _, _ = apply_feature_spec(df.iloc[test_idx], spec, label_col, logger)
 
+    # Drop type_col from features — it is the stage-2 label and must not be an input.
+    _type_col_to_drop = args.type_col or (cfg.type_col if hasattr(cfg, "type_col") else None)
+    if _type_col_to_drop and _type_col_to_drop in X_train_raw.columns:
+        logger.info("Dropping type_col '%s' from features to prevent label leakage.", _type_col_to_drop)
+        X_train_raw = X_train_raw.drop(columns=[_type_col_to_drop])
+        X_val_raw   = X_val_raw.drop(columns=[_type_col_to_drop], errors="ignore")
+        X_test_raw  = X_test_raw.drop(columns=[_type_col_to_drop], errors="ignore")
+        cat_cols = [c for c in cat_cols if c != _type_col_to_drop]
+        num_cols = [c for c in num_cols if c != _type_col_to_drop]
+
     y_train = y.iloc[train_idx]
     y_val = y.iloc[val_idx]
     y_test = y.iloc[test_idx]
@@ -730,6 +741,8 @@ def run(args) -> Dict[str, object]:
                     spec_model = build_lightgbm(seed)
                 elif model_name == "xgboost":
                     spec_model = build_xgboost(seed)
+                elif model_name == "cnn_lstm":
+                    spec_model = build_cnn_lstm(seed)
                 else:
                     spec_model = None
 
@@ -926,6 +939,8 @@ def run(args) -> Dict[str, object]:
             spec_model = build_lightgbm(seed)
         elif model_name == "xgboost":
             spec_model = build_xgboost(seed)
+        elif model_name == "cnn_lstm":
+            spec_model = build_cnn_lstm(seed)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -943,7 +958,7 @@ def run(args) -> Dict[str, object]:
 
         _feat_names = None
         _type_explain_dir = None
-        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt"}:
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm"}:
             if selected_feature_names is not None:
                 _feat_names = list(selected_feature_names)
             else:
@@ -953,7 +968,7 @@ def run(args) -> Dict[str, object]:
         row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"], type_explain_dir=_type_explain_dir, feat_names=_feat_names))
         metrics_rows.append(row)
 
-        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt"}:
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm"}:
             explain_dir = run_dir / "explain" / spec_model.name
             explain_dir.mkdir(parents=True, exist_ok=True)
 
