@@ -315,6 +315,21 @@ def run(args) -> Dict[str, object]:
     df, cfg = load_dataset(args.datasets, args.dataset)
     n_rows_loaded = len(df)  # record before any subsampling
 
+    # Apply type_mapping if configured (e.g. CIC-IoT-2023 34→8 macro categories).
+    # Creates a "type_macro" column; pass --type_col type_macro for 8-class evaluation.
+    if hasattr(cfg, "type_mapping") and cfg.type_mapping:
+        raw_type_col = cfg.type_col or "type"
+        if raw_type_col in df.columns:
+            df["type_macro"] = df[raw_type_col].map(cfg.type_mapping)
+            unmapped = df["type_macro"].isna().sum()
+            if unmapped > 0:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "type_mapping: %d rows have unmapped type values; filling with original.",
+                    unmapped,
+                )
+                df["type_macro"] = df["type_macro"].fillna(df[raw_type_col])
+
     if args.max_rows:
         df = df.sample(n=min(len(df), args.max_rows), random_state=seed)
 
@@ -903,6 +918,9 @@ def run(args) -> Dict[str, object]:
             "coverage": coverage,
         }
 
+    # Collect test scores per model for DeLong pairwise significance tests
+    _model_test_scores: dict[str, np.ndarray] = {}
+
     for model_name in models:
         logger.info("Training model: %s", model_name)
 
@@ -912,6 +930,7 @@ def run(args) -> Dict[str, object]:
             row = evaluate_model(model_name, scores_val, scores_test)
             row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
             metrics_rows.append(row)
+            _model_test_scores[model_name] = np.asarray(scores_test, dtype=float)
             continue
 
         if model_name == "baseline_threshold":
@@ -927,6 +946,39 @@ def run(args) -> Dict[str, object]:
             row = evaluate_model(model_name, scores_val, scores_test)
             row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"]))
             metrics_rows.append(row)
+            _model_test_scores[model_name] = np.asarray(scores_test, dtype=float)
+            continue
+
+        if model_name == "gnn":
+            from hydra.models.gnn import train_gnn as _train_gnn
+            _src_col = getattr(cfg, "group_col", None)
+            _dst_col = getattr(cfg, "dst_ip_col", None)
+            if (not _src_col or not _dst_col
+                    or _src_col not in df.columns
+                    or _dst_col not in df.columns):
+                logger.warning(
+                    "GNN skipped: dataset '%s' has no src/dst IP columns.", args.dataset
+                )
+                continue
+            _gnn_explain_dir = run_dir / "explain" / "gnn"
+            _gnn_type_vals = (
+                df[args.type_col].values
+                if args.type_col and args.type_col in df.columns
+                else None
+            )
+            _scores_val, _scores_test = _train_gnn(
+                df, train_idx, val_idx, test_idx, y_train, y_val,
+                src_col=_src_col, dst_col=_dst_col,
+                seed=seed, logger=logger,
+                out_explain_dir=_gnn_explain_dir,
+                type_col_vals=_gnn_type_vals,
+            )
+            row = evaluate_model("gnn", _scores_val, _scores_test, backend="torch")
+            row.update(_two_stage_metrics(
+                "gnn", _scores_test, row["threshold_at_recall_0_90"]
+            ))
+            metrics_rows.append(row)
+            _model_test_scores["gnn"] = np.asarray(_scores_test, dtype=float)
             continue
 
         if model_name == "logreg":
@@ -958,7 +1010,7 @@ def run(args) -> Dict[str, object]:
 
         _feat_names = None
         _type_explain_dir = None
-        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm"}:
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm", "logreg"}:
             if selected_feature_names is not None:
                 _feat_names = list(selected_feature_names)
             else:
@@ -967,8 +1019,9 @@ def run(args) -> Dict[str, object]:
 
         row.update(_two_stage_metrics(model_name, scores_test, row["threshold_at_recall_0_90"], type_explain_dir=_type_explain_dir, feat_names=_feat_names))
         metrics_rows.append(row)
+        _model_test_scores[spec_model.name] = np.asarray(scores_test, dtype=float)
 
-        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm"}:
+        if spec_model.name in {"random_forest", "lightgbm", "xgboost", "sklearn_gbdt", "cnn_lstm", "logreg"}:
             explain_dir = run_dir / "explain" / spec_model.name
             explain_dir.mkdir(parents=True, exist_ok=True)
 
@@ -995,6 +1048,126 @@ def run(args) -> Dict[str, object]:
                 defaults["explain"]["random_state"],
                 logger,
             )
+
+            # --- XAI Evaluation (5 criteria) ---
+            try:
+                from hydra.explain.eval_explain import run_xai_eval
+                from hydra.explain.tabular_explain import compute_binary_shap
+
+                _model_obj  = pipeline.named_steps["model"]
+                _model_type = (
+                    "deep"   if hasattr(_model_obj, "net_") else
+                    "linear" if spec_model.name == "logreg" else
+                    "tree"
+                )
+                _device = getattr(_model_obj, "device_", None)
+
+                # Dense preprocessed test set — already computed at line ~562/640
+                _X_eval_dense = X_test_proc
+                if hasattr(_X_eval_dense, "toarray"):
+                    _X_eval_dense = _X_eval_dense.toarray()
+                _X_eval_dense = np.asarray(_X_eval_dense, dtype=np.float32)
+
+                _eval_feat_names = list(feature_names)
+
+                # IG is expensive; reduce stability sample counts for CNN-LSTM
+                _stab_n  = 20 if _model_type == "deep" else 50
+                _stab_np = 5  if _model_type == "deep" else 10
+
+                # predict_fn operates in preprocessed model-input space
+                def _predict_fn(X_arr: np.ndarray) -> np.ndarray:
+                    _m = pipeline.named_steps["model"]
+                    return _m.predict_proba(X_arr)[:, 1]
+
+                # explain_fn: uses IG for deep, TreeSHAP/LinearSHAP for others
+                # Fewer IG steps (20) for fast stability probing
+                _ig_steps_fast  = 20
+                _ig_steps_full  = 50
+
+                def _explain_fn(X_arr: np.ndarray) -> np.ndarray:
+                    return compute_binary_shap(
+                        pipeline.named_steps["model"],
+                        X_arr,
+                        model_type=_model_type,
+                        device=_device,
+                        n_steps=_ig_steps_full,
+                    )
+
+                def _explain_fn_fast(X_arr: np.ndarray) -> np.ndarray:
+                    return compute_binary_shap(
+                        pipeline.named_steps["model"],
+                        X_arr,
+                        model_type=_model_type,
+                        device=_device,
+                        n_steps=_ig_steps_fast,
+                        max_explain=None,
+                    )
+
+                # Use fast variant for stability, full for faithfulness+timeliness
+                run_xai_eval(
+                    explain_fn=_explain_fn_fast,
+                    predict_fn=_predict_fn,
+                    X_test_dense=_X_eval_dense,
+                    feature_names=_eval_feat_names,
+                    dataset_name=args.dataset,
+                    out_path=explain_dir / "xai_eval.json",
+                    model_name=spec_model.name,
+                    stability_n_samples=_stab_n,
+                    stability_n_perturb=_stab_np,
+                    logger=logger,
+                )
+            except Exception as _xai_exc:
+                logger.warning("XAI eval failed for %s: %s", spec_model.name, _xai_exc)
+
+            # --- LIME local explanations (model-agnostic comparison baseline) ---
+            try:
+                from hydra.explain.tabular_explain import save_lime_explanations
+                save_lime_explanations(
+                    pipeline,
+                    X_train_raw,
+                    X_val_raw,
+                    feature_names,
+                    out_dir=explain_dir / "local_explanations",
+                    n_samples=defaults["explain"]["local_samples"],
+                    random_state=defaults["explain"]["random_state"],
+                    logger=logger,
+                )
+            except Exception as _lime_exc:
+                logger.warning("LIME failed for %s: %s", spec_model.name, _lime_exc)
+
+            # --- Anchors rule-based explanations (tree / linear models only) ---
+            if spec_model.name in {"random_forest", "lightgbm", "xgboost",
+                                    "sklearn_gbdt", "logreg"}:
+                try:
+                    from hydra.explain.tabular_explain import save_anchors_explanations
+                    save_anchors_explanations(
+                        pipeline,
+                        X_train_raw,
+                        X_val_raw,
+                        feature_names,
+                        out_dir=explain_dir / "local_explanations",
+                        n_samples=20,
+                        random_state=defaults["explain"]["random_state"],
+                        logger=logger,
+                    )
+                except Exception as _anch_exc:
+                    logger.warning("Anchors failed for %s: %s", spec_model.name, _anch_exc)
+
+            # --- Captum LayerConductance (CNN-LSTM only) ---
+            if spec_model.name == "cnn_lstm":
+                try:
+                    from hydra.explain.tabular_explain import save_captum_layer_conductance
+                    save_captum_layer_conductance(
+                        pipeline,
+                        X_val_raw,
+                        feature_names,
+                        out_dir=explain_dir / "layer_conductance",
+                        n_samples=100,
+                        random_state=defaults["explain"]["random_state"],
+                        logger=logger,
+                    )
+                except Exception as _cap_exc:
+                    logger.warning("Captum LayerConductance failed: %s", _cap_exc)
 
     # Label permutation leakage probe
     if args.label_permutation_probe:
@@ -1211,6 +1384,25 @@ def run(args) -> Dict[str, object]:
     # Save metrics summary
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(run_dir / "metrics_summary.csv", index=False)
+
+    # Save per-model test scores and run pairwise DeLong AUC significance tests
+    real_model_scores = {
+        m: s for m, s in _model_test_scores.items()
+        if m not in {"baseline_majority", "baseline_threshold"}
+    }
+    if real_model_scores:
+        scores_df = pd.DataFrame(real_model_scores, index=np.arange(len(y_test)))
+        scores_df.insert(0, "y_true", np.asarray(y_test, dtype=int))
+        scores_df.to_csv(run_dir / "test_scores.csv", index=False)
+        if len(real_model_scores) >= 2:
+            try:
+                from hydra.eval.metrics import delong_pairwise as _delong_pairwise
+                delong_df = _delong_pairwise(np.asarray(y_test, dtype=int), real_model_scores)
+                delong_df.to_csv(run_dir / "delong_tests.csv")
+                logger.info("DeLong pairwise tests saved → delong_tests.csv")
+            except Exception as _exc:
+                logger.warning("DeLong tests failed: %s", _exc)
+
     table = _format_model_comparison_table(metrics_df)
     if table:
         logger.info("Model comparison:\n%s", table)

@@ -19,6 +19,7 @@ def build_logreg(random_state: int) -> ModelSpec:
         max_iter=5000,
         tol=1e-3,
         solver="saga",
+        class_weight="balanced",
         random_state=random_state,
     )
     return ModelSpec(name="logreg", backend="sklearn", model=model)
@@ -29,12 +30,14 @@ def build_random_forest(random_state: int) -> ModelSpec:
         n_estimators=300,
         random_state=random_state,
         n_jobs=-1,
-        class_weight=None,
+        class_weight="balanced",
     )
     return ModelSpec(name="random_forest", backend="sklearn", model=model)
 
 
 def build_sklearn_gbdt(random_state: int) -> ModelSpec:
+    # GradientBoostingClassifier has no class_weight; use sample_weight at fit time instead.
+    # The pipeline passes sample_weight via fit_params when class_weight is set on the spec.
     model = GradientBoostingClassifier(
         n_estimators=300,
         learning_rate=0.05,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import numpy as np
+import pandas as pd
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
 ROC_AUC_TOL_SMALL = 0.10
@@ -83,6 +84,135 @@ def majority_baseline_sanity(pr_auc, prevalence, logger):
             pr_auc,
             prevalence,
         )
+
+
+def _structural_components(
+    pos_scores: np.ndarray, neg_scores: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Compute AUC and DeLong structural components (V01, V10).
+
+    Returns (auc, v_pos, v_neg) where:
+      v_pos[i] = P(neg < pos[i]) + 0.5 * P(neg == pos[i])  — shape (n_pos,)
+      v_neg[j] = P(pos > neg[j]) + 0.5 * P(pos == neg[j])  — shape (n_neg,)
+    """
+    neg_sorted = np.sort(neg_scores)
+    lo = np.searchsorted(neg_sorted, pos_scores, side="left")
+    hi = np.searchsorted(neg_sorted, pos_scores, side="right")
+    v_pos = (lo + hi) / 2.0 / len(neg_scores)
+
+    pos_sorted = np.sort(pos_scores)
+    lo2 = np.searchsorted(pos_sorted, neg_scores, side="left")
+    hi2 = np.searchsorted(pos_sorted, neg_scores, side="right")
+    n_pos = len(pos_scores)
+    v_neg = 1.0 - (lo2 + hi2) / 2.0 / n_pos
+
+    auc = float(np.mean(v_pos))
+    return auc, v_pos, v_neg
+
+
+def delong_auc_test(
+    y_true,
+    scores_a: np.ndarray,
+    scores_b: np.ndarray,
+) -> dict:
+    """DeLong et al. (1988) paired AUC significance test.
+
+    Tests H₀: AUC(A) == AUC(B) on the same test set.
+
+    Parameters
+    ----------
+    y_true   : binary labels (0/1)
+    scores_a : predicted probabilities from model A
+    scores_b : predicted probabilities from model B
+
+    Returns
+    -------
+    dict with keys: auc_a, auc_b, delta_auc, z_stat, p_value, significant_005
+    """
+    from scipy import stats as _stats
+
+    y = np.asarray(y_true, dtype=int)
+    sa = np.asarray(scores_a, dtype=float)
+    sb = np.asarray(scores_b, dtype=float)
+
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+    if len(pos_idx) == 0 or len(neg_idx) == 0:
+        return {
+            "auc_a": float("nan"), "auc_b": float("nan"),
+            "delta_auc": float("nan"), "z_stat": float("nan"),
+            "p_value": float("nan"), "significant_005": False,
+            "error": "need both positive and negative samples",
+        }
+
+    auc_a, v_pos_a, v_neg_a = _structural_components(sa[pos_idx], sa[neg_idx])
+    auc_b, v_pos_b, v_neg_b = _structural_components(sb[pos_idx], sb[neg_idx])
+
+    n_pos, n_neg = len(pos_idx), len(neg_idx)
+
+    # DeLong covariance: S = S_pos / n_pos + S_neg / n_neg
+    # where S_pos = cov matrix of [V01_a, V01_b], S_neg = cov of [V10_a, V10_b]
+    mat_pos = np.stack([v_pos_a, v_pos_b])  # (2, n_pos)
+    mat_neg = np.stack([v_neg_a, v_neg_b])  # (2, n_neg)
+
+    # np.cov with ddof=1; handle single-sample edge case
+    cov_pos = np.cov(mat_pos) if n_pos > 1 else np.zeros((2, 2))
+    cov_neg = np.cov(mat_neg) if n_neg > 1 else np.zeros((2, 2))
+
+    s11 = cov_pos[0, 0] / n_pos + cov_neg[0, 0] / n_neg
+    s22 = cov_pos[1, 1] / n_pos + cov_neg[1, 1] / n_neg
+    s12 = cov_pos[0, 1] / n_pos + cov_neg[0, 1] / n_neg
+
+    var_diff = s11 + s22 - 2 * s12
+    if var_diff <= 0:
+        return {
+            "auc_a": float(auc_a), "auc_b": float(auc_b),
+            "delta_auc": float(auc_a - auc_b),
+            "z_stat": float("nan"), "p_value": float("nan"),
+            "significant_005": False,
+        }
+
+    z = (auc_a - auc_b) / np.sqrt(var_diff)
+    p = float(2 * _stats.norm.sf(abs(z)))
+
+    return {
+        "auc_a": float(auc_a),
+        "auc_b": float(auc_b),
+        "delta_auc": float(auc_a - auc_b),
+        "z_stat": float(z),
+        "p_value": p,
+        "significant_005": p < 0.05,
+    }
+
+
+def delong_pairwise(
+    y_true,
+    model_scores: dict[str, np.ndarray],
+) -> pd.DataFrame:
+    """All-pairs DeLong AUC tests.
+
+    Parameters
+    ----------
+    y_true        : binary labels
+    model_scores  : {model_name: score_array} — same test set for all
+
+    Returns
+    -------
+    DataFrame indexed by (model_a, model_b) with DeLong result columns.
+    """
+    models = sorted(model_scores)
+    rows = []
+    for i, ma in enumerate(models):
+        for j, mb in enumerate(models):
+            if i >= j:
+                continue
+            result = delong_auc_test(y_true, model_scores[ma], model_scores[mb])
+            result["model_a"] = ma
+            result["model_b"] = mb
+            rows.append(result)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index(["model_a", "model_b"])
 
 
 def hash_rows_postprocess(X) -> list[str]:

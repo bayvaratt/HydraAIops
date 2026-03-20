@@ -9,6 +9,88 @@ from sklearn.inspection import permutation_importance
 
 
 # ---------------------------------------------------------------------------
+# SOTA attribution: canonical per-sample attribution array
+# ---------------------------------------------------------------------------
+
+def compute_binary_shap(
+    model,
+    X_dense: np.ndarray,
+    model_type: str,
+    device=None,
+    n_steps: int = 50,
+    max_explain: Optional[int] = 300,
+) -> Optional[np.ndarray]:
+    """Compute per-sample binary classification attributions.
+
+    Returns a (n_samples, n_features) float32 array of signed attribution
+    values: positive = pushes toward P(attack=1), negative = toward normal.
+
+    Dispatch
+    --------
+    tree   → SHAP TreeExplainer (Lundberg & Lee 2020 — SOTA for tree ensembles)
+    linear → SHAP LinearExplainer (exact for linear models)
+    deep   → Integrated Gradients (Sundararajan et al. 2017 — satisfies
+             completeness + sensitivity axioms; preferred over GradientExplainer
+             for CNN-LSTM because MaxPool1d subgradients are averaged across
+             the full interpolation path)
+
+    Parameters
+    ----------
+    model      : fitted sklearn estimator (Pipeline.named_steps["model"])
+    X_dense    : (n, f) dense float32, already preprocessed
+    model_type : "tree" | "linear" | "deep"
+    device     : torch.device (deep models only)
+    n_steps    : IG integration steps (deep models only)
+    max_explain: subsample cap
+
+    Returns None on failure (caller logs and skips eval).
+    """
+    import shap
+
+    X_dense = np.asarray(X_dense, dtype=np.float32)
+
+    if max_explain is not None and len(X_dense) > max_explain:
+        rng = np.random.default_rng(42)
+        X_dense = X_dense[rng.choice(len(X_dense), size=max_explain, replace=False)]
+
+    try:
+        if model_type == "deep":
+            from hydra.explain.integrated_gradients import integrated_gradients_batch
+            import torch
+            dev = device if device is not None else torch.device("cpu")
+            return integrated_gradients_batch(
+                model.net_, dev, X_dense,
+                n_steps=n_steps, max_explain=None,  # already subsampled above
+            )
+
+        if model_type == "linear":
+            masker = shap.maskers.Independent(X_dense, max_samples=min(100, len(X_dense)))
+            explainer = shap.LinearExplainer(model, masker)
+            sv = explainer.shap_values(X_dense)
+            # LinearExplainer binary: returns (n, f) directly
+            if isinstance(sv, list):
+                sv = sv[-1]
+            return np.asarray(sv, dtype=np.float32)
+
+        # model_type == "tree" (RF, XGBoost, LightGBM, sklearn_gbdt)
+        explainer = shap.TreeExplainer(model)
+        sv = explainer.shap_values(X_dense)
+        if isinstance(sv, list):
+            # list of arrays: one per class — take positive class (last)
+            return np.asarray(sv[-1], dtype=np.float32)
+        if hasattr(sv, "values"):
+            sv = sv.values
+        sv = np.asarray(sv)
+        if sv.ndim == 3:
+            # (n, f, n_classes) — take attack class
+            return sv[:, :, -1].astype(np.float32)
+        return sv.astype(np.float32)
+
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Deep (PyTorch) SHAP helper
 # ---------------------------------------------------------------------------
 
@@ -288,3 +370,324 @@ def save_local_explanations(
     df = pd.DataFrame(contributions, columns=feature_names)
     df.insert(0, "sample_id", X_sample.index.astype(str))
     df.to_csv(out_dir / "local_explanations.csv", index=False)
+
+
+# ---------------------------------------------------------------------------
+# LIME: local interpretable model-agnostic explanations (Ribeiro et al. 2016)
+# ---------------------------------------------------------------------------
+
+def save_lime_explanations(
+    pipeline,
+    X_train_raw: pd.DataFrame,
+    X_val_raw: pd.DataFrame,
+    feature_names: List[str],
+    out_dir: Path,
+    n_samples: int = 50,
+    n_lime_samples: int = 2000,
+    random_state: int = 42,
+    logger=None,
+):
+    """LIME local linear approximations for a sample of val instances.
+
+    LIME perturbs each instance, queries the model, and fits a sparse local
+    linear model.  The resulting coefficients represent each feature's
+    contribution to the prediction for that specific instance.
+
+    Provides a model-agnostic comparison baseline alongside SHAP/IG —
+    useful for verifying that SHAP attributions are consistent with local
+    approximations from an entirely independent method.
+
+    Saves
+    -----
+    out_dir/lime_explanations.csv — (n_samples × n_features) coefficient matrix
+    """
+    try:
+        from lime.lime_tabular import LimeTabularExplainer
+    except ImportError:
+        if logger:
+            logger.warning("LIME not installed (pip install lime); skipping.")
+        return
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model = _get_model(pipeline)
+
+    # Build preprocessed arrays for LIME background + prediction callable
+    X_train_proc = _transform_for_model(pipeline, X_train_raw)
+    X_train_dense = (
+        X_train_proc.toarray() if hasattr(X_train_proc, "toarray")
+        else np.asarray(X_train_proc, dtype=np.float32)
+    )
+
+    X_val_proc = _transform_for_model(pipeline, X_val_raw)
+    X_val_dense = (
+        X_val_proc.toarray() if hasattr(X_val_proc, "toarray")
+        else np.asarray(X_val_proc, dtype=np.float32)
+    )
+
+    rng = np.random.default_rng(random_state)
+    sample_idx = rng.choice(len(X_val_dense), size=min(n_samples, len(X_val_dense)),
+                            replace=False)
+    X_sample = X_val_dense[sample_idx]
+
+    # Predict function: operates in preprocessed space
+    def _predict_proba(X_arr: np.ndarray) -> np.ndarray:
+        proba = model.predict_proba(X_arr)
+        if proba.ndim == 1:
+            return np.column_stack([1 - proba, proba])
+        return proba
+
+    explainer = LimeTabularExplainer(
+        training_data=X_train_dense,
+        feature_names=list(feature_names),
+        mode="classification",
+        random_state=random_state,
+    )
+
+    rows = []
+    for i, x in enumerate(X_sample):
+        try:
+            exp = explainer.explain_instance(
+                x, _predict_proba,
+                num_features=len(feature_names),
+                num_samples=n_lime_samples,
+                labels=(1,),
+            )
+            coefs = dict(exp.as_list(label=1))
+            # Map LIME feature strings back to column names
+            row = {fn: 0.0 for fn in feature_names}
+            for lime_feat, coef in coefs.items():
+                # LIME stringifies features like "feat_name <= 0.5"
+                # Extract the feature name part
+                for fn in feature_names:
+                    if fn in lime_feat:
+                        row[fn] = coef
+                        break
+            rows.append(row)
+        except Exception:
+            rows.append({fn: float("nan") for fn in feature_names})
+
+    df = pd.DataFrame(rows, columns=list(feature_names))
+    df.insert(0, "sample_id", sample_idx.tolist())
+    df.to_csv(out_dir / "lime_explanations.csv", index=False)
+    if logger:
+        logger.info("Saved LIME explanations to %s", out_dir / "lime_explanations.csv")
+
+
+# ---------------------------------------------------------------------------
+# Anchors: rule-based explanations (Ribeiro et al. 2018)
+# ---------------------------------------------------------------------------
+
+def save_anchors_explanations(
+    pipeline,
+    X_train_raw: pd.DataFrame,
+    X_val_raw: pd.DataFrame,
+    feature_names: List[str],
+    out_dir: Path,
+    n_samples: int = 20,
+    random_state: int = 42,
+    logger=None,
+):
+    """Anchors — high-precision IF-THEN rules (Ribeiro et al. AAAI 2018).
+
+    An anchor is a set of feature conditions that 'anchors' the prediction:
+        IF proto=tcp AND src_bytes > 1024 THEN attack (precision ≥ 0.95)
+
+    Anchors are directly actionable in IDS: an analyst can translate them
+    directly into firewall rules or detection signatures.
+
+    Only runs for tree/linear models (fast predict_fn required).
+    Falls back gracefully if `alibi` is not installed.
+
+    Saves
+    -----
+    out_dir/anchors.json — list of {sample_id, anchor, precision, coverage}
+    """
+    try:
+        from alibi.explainers import AnchorTabular
+    except ImportError:
+        if logger:
+            logger.warning("alibi not installed (pip install alibi); skipping Anchors.")
+        return
+
+    import json
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model = _get_model(pipeline)
+
+    X_train_proc = _transform_for_model(pipeline, X_train_raw)
+    X_train_dense = (
+        X_train_proc.toarray() if hasattr(X_train_proc, "toarray")
+        else np.asarray(X_train_proc, dtype=np.float32)
+    )
+    X_val_proc = _transform_for_model(pipeline, X_val_raw)
+    X_val_dense = (
+        X_val_proc.toarray() if hasattr(X_val_proc, "toarray")
+        else np.asarray(X_val_proc, dtype=np.float32)
+    )
+
+    def _predict(X_arr: np.ndarray) -> np.ndarray:
+        return model.predict(X_arr)
+
+    rng = np.random.default_rng(random_state)
+    sample_idx = rng.choice(len(X_val_dense), size=min(n_samples, len(X_val_dense)),
+                            replace=False)
+
+    try:
+        explainer = AnchorTabular(
+            predictor=_predict,
+            feature_names=list(feature_names),
+        )
+        explainer.fit(X_train_dense, disc_perc=(25, 50, 75))
+    except Exception as exc:
+        if logger:
+            logger.warning("Anchors fit failed (%s); skipping.", exc)
+        return
+
+    import signal
+
+    def _timeout_handler(signum, frame):
+        raise TimeoutError("Anchors explain timed out")
+
+    results = []
+    for idx in sample_idx:
+        x = X_val_dense[idx]
+        try:
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(30)  # 30-second hard limit per sample
+            try:
+                exp = explainer.explain(x, threshold=0.95)
+            finally:
+                signal.alarm(0)  # cancel alarm
+            anchor_str = " AND ".join(exp.anchor) if exp.anchor else "(empty)"
+            results.append({
+                "sample_id": int(idx),
+                "anchor":    anchor_str,
+                "precision": float(exp.precision),
+                "coverage":  float(exp.coverage),
+                "prediction": int(_predict(x[None])[0]),
+            })
+        except Exception:
+            results.append({
+                "sample_id": int(idx),
+                "anchor": None,
+                "precision": None,
+                "coverage": None,
+                "prediction": None,
+            })
+
+    with open(out_dir / "anchors.json", "w") as f:
+        json.dump(results, f, indent=2)
+    if logger:
+        logger.info("Saved Anchors explanations to %s", out_dir / "anchors.json")
+
+
+# ---------------------------------------------------------------------------
+# Captum LayerConductance: LSTM hidden-unit attribution for CNN-LSTM
+# ---------------------------------------------------------------------------
+
+def save_captum_layer_conductance(
+    pipeline,
+    X_val_raw: pd.DataFrame,
+    feature_names: List[str],
+    out_dir: Path,
+    n_samples: int = 100,
+    random_state: int = 42,
+    logger=None,
+):
+    """Captum LayerConductance on the LSTM layer of the CNN-LSTM model.
+
+    LayerConductance (Dhamdhere et al. 2018) is a layer-level extension of
+    Integrated Gradients.  It attributes the model output to each HIDDEN UNIT
+    of a given layer, revealing which LSTM memory cells are most responsible
+    for the attack/normal decision.
+
+    This is COMPLEMENTARY to input-level IG (which attributes to features).
+    Together they answer:
+      - IG: "which input features matter?"
+      - LayerConductance: "which LSTM units encode those features?"
+
+    Saves
+    -----
+    out_dir/layer_conductance_lstm.csv — (n_samples × hidden_dim) attribution
+    out_dir/layer_conductance_lstm_summary.csv — mean |conductance| per unit
+    """
+    model = _get_model(pipeline)
+    if not (hasattr(model, "net_") and model.net_ is not None):
+        return  # Not a CNN-LSTM model
+
+    try:
+        from captum.attr import LayerConductance
+    except ImportError:
+        if logger:
+            logger.warning("captum not installed (pip install captum); skipping LayerConductance.")
+        return
+
+    import torch
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    net = model.net_
+    device = model.device_
+    net.eval()
+    net.to(device)
+
+    X_val_proc = _transform_for_model(pipeline, X_val_raw)
+    X_dense = (
+        X_val_proc.toarray() if hasattr(X_val_proc, "toarray")
+        else np.asarray(X_val_proc, dtype=np.float32)
+    )
+
+    rng = np.random.default_rng(random_state)
+    idx = rng.choice(len(X_dense), size=min(n_samples, len(X_dense)), replace=False)
+    X_sample = X_dense[idx]
+
+    X_t = torch.tensor(X_sample, dtype=torch.float32, device=device)
+    baseline_t = torch.zeros_like(X_t)
+
+    # LayerConductance on the LSTM layer
+    lc = LayerConductance(net, net.lstm)
+
+    try:
+        # binary model returns (batch,) — wrap to (batch, 1) for captum
+        with torch.no_grad():
+            probe = net(X_t[:1])
+        if probe.dim() == 1:
+            import torch.nn as nn
+            class _Wrap(nn.Module):
+                def __init__(self, inner): super().__init__(); self.inner = inner
+                def forward(self, x): return self.inner(x).unsqueeze(-1)
+            lc = LayerConductance(_Wrap(net).to(device), net.lstm)
+
+        # LSTM outputs (output, (h_n, c_n)); LayerConductance attributes to output
+        # target=0 = attack class (positive logit direction)
+        conductance = lc.attribute(
+            X_t, baselines=baseline_t, target=0,
+            n_steps=20,
+        )
+        # conductance shape: (n_samples, seq_len, hidden_dim) or (n_samples, hidden_dim)
+        cond_np = conductance.detach().cpu().numpy()
+        if cond_np.ndim == 3:
+            cond_np = cond_np.mean(axis=1)  # (n_samples, hidden_dim)
+
+        hidden_dim = cond_np.shape[1]
+        col_names = [f"lstm_h{i}" for i in range(hidden_dim)]
+
+        df_full = pd.DataFrame(cond_np, columns=col_names)
+        df_full.to_csv(out_dir / "layer_conductance_lstm.csv", index=False)
+
+        summary = pd.DataFrame({
+            "lstm_unit": col_names,
+            "mean_abs_conductance": np.abs(cond_np).mean(axis=0),
+        }).sort_values("mean_abs_conductance", ascending=False)
+        summary.to_csv(out_dir / "layer_conductance_lstm_summary.csv", index=False)
+
+        if logger:
+            logger.info("Saved Captum LayerConductance to %s", out_dir)
+    except Exception as exc:
+        if logger:
+            logger.warning("Captum LayerConductance failed (%s); skipping.", exc)
