@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 DATASET="ton_iot"
-RUNS_DIR="runs/${DATASET}"
+RUNS_DIR="results/${DATASET}"
 AGG_DIR="${RUNS_DIR}/aggregated"
 FIG_DIR="${AGG_DIR}/report_figures"
 

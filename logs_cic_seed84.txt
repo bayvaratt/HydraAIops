@@ -1,0 +1,122 @@
+2026-03-23 10:07:22,426 [WARNING] HYDRA_DISABLE_LIGHTGBM=1; LightGBM will fall back to xgboost/sklearn.
+2026-03-23 10:08:08,218 [WARNING] Stratified split is NOT deployment-realistic and is provided only as a naive baseline.
+2026-03-23 10:08:08,300 [INFO] Run ID: 20260323_100722_426005_stratified_behaviour_only
+2026-03-23 10:08:08,300 [INFO] Dataset: cic_iot2023
+2026-03-23 10:08:08,300 [INFO] Split strategy: stratified
+2026-03-23 10:08:08,300 [INFO] Feature regime: behaviour_only
+2026-03-23 10:08:10,330 [INFO] Feature regime: behaviour_only
+2026-03-23 10:08:10,330 [INFO] Dropping columns (1): ['ipv']
+2026-03-23 10:08:16,466 [INFO] Dropping type_col 'type' from features to prevent label leakage.
+2026-03-23 10:08:17,024 [INFO] Prevalence: train=0.9581 val=0.9581 test=0.9581
+2026-03-23 10:08:17,025 [INFO] Label counts: train=2224838 (pos=2131680 neg=93158) val=476752 (pos=456789 neg=19963) test=476752 (pos=456789 neg=19963)
+2026-03-23 10:09:10,539 [INFO] Row-hash overlap counts: train_val=2702 train_test=2706 val_test=705
+2026-03-23 10:09:10,542 [INFO] Row-hash train->test overlap: count=2706 rate_by_test=0.005676 rate_by_train=0.001216
+2026-03-23 10:09:10,543 [WARNING] Duplicate leakage detected: train_test_overlap_rate_by_test=0.005676 train_test_overlap_rate_by_train=0.001216 (threshold=0.001000)
+2026-03-23 10:09:11,884 [WARNING] HYDRA_DISABLE_LIGHTGBM=1; lightgbm slot will use sklearn_gbdt fallback
+2026-03-23 10:09:11,884 [INFO] Training model: baseline_majority
+2026-03-23 10:09:16,913 [INFO] Training model: baseline_threshold
+2026-03-23 10:09:25,804 [WARNING] baseline_threshold: missing duration column; skipping
+2026-03-23 10:09:25,807 [WARNING] baseline_threshold: missing bytes columns; skipping
+2026-03-23 10:09:26,360 [WARNING] baseline_threshold: missing duration column; skipping
+2026-03-23 10:09:26,360 [WARNING] baseline_threshold: missing bytes columns; skipping
+2026-03-23 10:09:30,817 [INFO] Training model: logreg
+2026-03-25 23:43:27,396 [WARNING] HYDRA_DISABLE_LIGHTGBM=1; LightGBM will fall back to xgboost/sklearn.
+2026-03-25 23:43:49,972 [WARNING] Stratified split is NOT deployment-realistic and is provided only as a naive baseline.
+2026-03-25 23:43:49,977 [INFO] Run ID: 20260325_234327_396207_stratified_behaviour_only
+2026-03-25 23:43:49,977 [INFO] Dataset: cic_iot2023
+2026-03-25 23:43:49,977 [INFO] Split strategy: stratified
+2026-03-25 23:43:49,977 [INFO] Feature regime: behaviour_only
+2026-03-25 23:43:50,008 [INFO] Feature regime: behaviour_only
+2026-03-25 23:43:50,008 [INFO] Dropping columns (1): ['ipv']
+2026-03-25 23:43:50,069 [INFO] Dropping type_col 'type' from features to prevent label leakage.
+2026-03-25 23:43:50,081 [INFO] Prevalence: train=0.9585 val=0.9585 test=0.9585
+2026-03-25 23:43:50,081 [INFO] Label counts: train=139999 (pos=134188 neg=5811) val=30001 (pos=28756 neg=1245) test=30000 (pos=28755 neg=1245)
+2026-03-25 23:43:53,580 [INFO] Row-hash overlap counts: train_val=15 train_test=20 val_test=3
+2026-03-25 23:43:53,581 [INFO] Row-hash train->test overlap: count=20 rate_by_test=0.000667 rate_by_train=0.000143
+2026-03-25 23:43:53,643 [WARNING] HYDRA_DISABLE_LIGHTGBM=1; lightgbm slot will use sklearn_gbdt fallback
+2026-03-25 23:43:53,643 [INFO] Training model: baseline_majority
+2026-03-25 23:43:53,880 [INFO] Training model: baseline_threshold
+2026-03-25 23:43:53,886 [WARNING] baseline_threshold: missing duration column; skipping
+2026-03-25 23:43:53,887 [WARNING] baseline_threshold: missing bytes columns; skipping
+2026-03-25 23:43:53,893 [WARNING] baseline_threshold: missing duration column; skipping
+2026-03-25 23:43:53,893 [WARNING] baseline_threshold: missing bytes columns; skipping
+2026-03-25 23:43:54,111 [INFO] Training model: logreg
+2026-03-25 23:45:11,486 [WARNING] Type SHAP failed (Model type not yet supported by TreeExplainer: <class 'sklearn.linear_model._logistic.LogisticRegression'>); skipping
+2026-03-25 23:45:11,665 [INFO] Saved logreg |coef_| global importance to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/logreg/global_importance.csv
+2026-03-25 23:45:11,668 [INFO] Using SHAP for local explanations
+2026-03-25 23:45:11,675 [INFO] XAI eval [logreg]: n=30000, f=38
+2026-03-25 23:45:11,675 [INFO] XAI eval [logreg]: computing attributions (cap 500)...
+2026-03-25 23:45:11,675 [INFO] XAI eval [logreg]: faithfulness...
+2026-03-25 23:45:11,676 [INFO] XAI eval [logreg]: stability (n_samples=50, n_perturb=10, noise_std=0.05)...
+2026-03-25 23:45:11,689 [INFO] XAI eval [logreg]: simplicity...
+2026-03-25 23:45:11,691 [INFO] XAI eval [logreg]: plausibility...
+2026-03-25 23:45:11,691 [INFO] XAI eval [logreg]: timeliness...
+2026-03-25 23:45:11,692 [INFO] XAI eval [logreg]: saved to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/logreg/xai_eval.json
+2026-03-25 23:45:12,911 [INFO] Saved LIME explanations to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/logreg/local_explanations/lime_explanations.csv
+2026-03-25 23:45:12,912 [INFO] Training model: random_forest
+2026-03-26 00:09:27,309 [INFO] Saved type classifier SHAP to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/random_forest/type_classifier
+2026-03-26 00:09:27,586 [INFO] Using SHAP for local explanations
+2026-03-26 00:09:27,878 [INFO] XAI eval [random_forest]: n=30000, f=38
+2026-03-26 00:09:27,878 [INFO] XAI eval [random_forest]: computing attributions (cap 100)...
+2026-03-26 00:09:28,458 [INFO] XAI eval [random_forest]: faithfulness...
+2026-03-26 00:09:28,523 [INFO] XAI eval [random_forest]: stability (n_samples=10, n_perturb=5, noise_std=0.05)...
+2026-03-26 00:09:29,033 [INFO] XAI eval [random_forest]: simplicity...
+2026-03-26 00:09:29,034 [INFO] XAI eval [random_forest]: plausibility...
+2026-03-26 00:09:29,034 [INFO] XAI eval [random_forest]: timeliness...
+2026-03-26 00:09:30,184 [INFO] XAI eval [random_forest]: saved to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/random_forest/xai_eval.json
+2026-03-26 00:09:32,175 [INFO] Saved LIME explanations to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/random_forest/local_explanations/lime_explanations.csv
+2026-03-26 00:09:32,176 [INFO] Training model: xgboost
+2026-03-26 00:15:47,158 [INFO] Saved type classifier SHAP to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/xgboost/type_classifier
+2026-03-26 00:15:47,473 [INFO] Using SHAP for local explanations
+2026-03-26 00:15:47,576 [INFO] XAI eval [xgboost]: n=30000, f=38
+2026-03-26 00:15:47,576 [INFO] XAI eval [xgboost]: computing attributions (cap 100)...
+2026-03-26 00:15:47,699 [INFO] XAI eval [xgboost]: faithfulness...
+2026-03-26 00:15:47,702 [INFO] XAI eval [xgboost]: stability (n_samples=10, n_perturb=5, noise_std=0.05)...
+2026-03-26 00:15:52,332 [INFO] XAI eval [xgboost]: simplicity...
+2026-03-26 00:15:52,333 [INFO] XAI eval [xgboost]: plausibility...
+2026-03-26 00:15:52,333 [INFO] XAI eval [xgboost]: timeliness...
+2026-03-26 00:15:52,621 [INFO] XAI eval [xgboost]: saved to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/xgboost/xai_eval.json
+2026-03-26 00:15:54,022 [INFO] Saved LIME explanations to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/xgboost/local_explanations/lime_explanations.csv
+2026-03-26 00:15:54,024 [INFO] Training model: lightgbm
+2026-03-26 11:06:21,902 [WARNING] Type SHAP failed (GradientBoostingClassifier is only supported for binary classification right now!); skipping
+2026-03-26 11:06:22,107 [INFO] Using SHAP for local explanations
+2026-03-26 11:06:22,136 [INFO] XAI eval [lightgbm]: n=30000, f=38
+2026-03-26 11:06:22,136 [INFO] XAI eval [lightgbm]: computing attributions (cap 100)...
+2026-03-26 11:06:22,148 [INFO] XAI eval [lightgbm]: faithfulness...
+2026-03-26 11:06:22,151 [INFO] XAI eval [lightgbm]: stability (n_samples=10, n_perturb=5, noise_std=0.05)...
+2026-03-26 11:06:22,351 [INFO] XAI eval [lightgbm]: simplicity...
+2026-03-26 11:06:22,351 [INFO] XAI eval [lightgbm]: plausibility...
+2026-03-26 11:06:22,351 [INFO] XAI eval [lightgbm]: timeliness...
+2026-03-26 11:06:22,374 [INFO] XAI eval [lightgbm]: saved to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/lightgbm/xai_eval.json
+2026-03-26 11:06:23,777 [INFO] Saved LIME explanations to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/lightgbm/local_explanations/lime_explanations.csv
+2026-03-26 11:06:23,778 [INFO] Training model: sklearn_gbdt
+2026-03-26 11:46:38,320 [WARNING] Type SHAP failed (GradientBoostingClassifier is only supported for binary classification right now!); skipping
+2026-03-26 11:46:38,524 [INFO] Using SHAP for local explanations
+2026-03-26 11:46:38,538 [INFO] XAI eval [sklearn_gbdt]: n=30000, f=38
+2026-03-26 11:46:38,538 [INFO] XAI eval [sklearn_gbdt]: computing attributions (cap 100)...
+2026-03-26 11:46:38,549 [INFO] XAI eval [sklearn_gbdt]: faithfulness...
+2026-03-26 11:46:38,551 [INFO] XAI eval [sklearn_gbdt]: stability (n_samples=10, n_perturb=5, noise_std=0.05)...
+2026-03-26 11:46:38,752 [INFO] XAI eval [sklearn_gbdt]: simplicity...
+2026-03-26 11:46:38,753 [INFO] XAI eval [sklearn_gbdt]: plausibility...
+2026-03-26 11:46:38,753 [INFO] XAI eval [sklearn_gbdt]: timeliness...
+2026-03-26 11:46:38,779 [INFO] XAI eval [sklearn_gbdt]: saved to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/sklearn_gbdt/xai_eval.json
+2026-03-26 11:46:40,226 [INFO] Saved LIME explanations to runs/cic_iot2023/20260325_234327_396207_stratified_behaviour_only/explain/sklearn_gbdt/local_explanations/lime_explanations.csv
+2026-03-26 11:46:40,349 [INFO] DeLong pairwise tests saved → delong_tests.csv
+2026-03-26 11:46:40,354 [INFO] Model comparison:
+             model      backend pr_auc pr_lift roc_auc precision@0.90 recall@0.90 f1@0.90 fpr@0.90 coverage
+           xgboost      xgboost 0.9998  0.0413  0.9963         1.0000      0.9065  0.9509   0.0000   0.8689
+          lightgbm sklearn_gbdt 0.9998  0.0413  0.9957         1.0000      0.9002  0.9475   0.0000   0.8628
+      sklearn_gbdt      sklearn 0.9998  0.0413  0.9957         1.0000      0.9002  0.9475   0.0000   0.8628
+     random_forest      sklearn 0.9998  0.0413  0.9955         1.0000      0.9544  0.9767   0.0000   0.9148
+            logreg      sklearn 0.9996  0.0411  0.9916         1.0000      0.8988  0.9467   0.0000   0.8615
+baseline_threshold              0.9980  0.0395  0.9755         1.0000      0.9493  0.9740   0.0000   0.9099
+ baseline_majority              0.9585  0.0000  0.5000         0.9585      1.0000  0.9788   1.0000   1.0000
+2026-03-26 11:46:40,355 [INFO] Two-stage type comparison:
+             model type_acc attack_acc attack_acc_det attack_f1_macro attack_f1_weighted unk_frac
+     random_forest   0.7565     0.7460         0.7816          0.7164             0.7744   0.0000
+           xgboost   0.7385     0.7271         0.8022          0.8313             0.7983   0.0000
+          lightgbm   0.7369     0.7255         0.8060          0.7782             0.8008   0.0000
+      sklearn_gbdt   0.7369     0.7255         0.8060          0.7782             0.8008   0.0000
+            logreg   0.6944     0.6812         0.7579          0.6349             0.7363   0.0000
+ baseline_majority   0.1109     0.1157         0.1157          0.0063             0.0240   0.0000
+baseline_threshold   0.1522     0.1155         0.1216          0.0114             0.0264   0.0000

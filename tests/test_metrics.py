@@ -1,6 +1,6 @@
 import numpy as np
 
-from hydra.eval.thresholds import coverage_at_threshold, fpr_at_threshold, select_threshold_at_recall
+from hydra.evaluation.thresholds import coverage_at_threshold, fpr_at_threshold, select_threshold_at_recall
 
 
 def test_threshold_selection_and_fpr():

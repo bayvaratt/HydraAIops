@@ -19,7 +19,6 @@ def build_logreg(random_state: int) -> ModelSpec:
         max_iter=5000,
         tol=1e-3,
         solver="saga",
-        class_weight="balanced",
         random_state=random_state,
     )
     return ModelSpec(name="logreg", backend="sklearn", model=model)
@@ -27,9 +26,10 @@ def build_logreg(random_state: int) -> ModelSpec:
 
 def build_random_forest(random_state: int) -> ModelSpec:
     model = RandomForestClassifier(
-        n_estimators=300,
+        n_estimators=100,
+        max_depth=15,
         random_state=random_state,
-        n_jobs=-1,
+        n_jobs=2,
         class_weight="balanced",
     )
     return ModelSpec(name="random_forest", backend="sklearn", model=model)

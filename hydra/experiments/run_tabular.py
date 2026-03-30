@@ -38,11 +38,12 @@ from hydra.data.preprocess import apply_feature_spec, build_feature_spec, fit_pr
 from hydra.data.split import (
     split_group_stratified_by_label,
     split_host,
+    split_host_type_aware,
     split_stratified,
     split_stratified_by_column,
     split_temporal,
 )
-from hydra.eval.metrics import (
+from hydra.evaluation.metrics import (
     compute_brier,
     compute_ks_statistic,
     compute_log_loss,
@@ -55,13 +56,13 @@ from hydra.eval.metrics import (
     PR_AUC_TOL,
     warn_on_constant_scores,
 )
-from hydra.eval.thresholds import (
+from hydra.evaluation.thresholds import (
     coverage_at_threshold,
     fpr_at_threshold,
     precision_recall_at_threshold,
     select_threshold_max_precision_at_recall,
 )
-from hydra.explain.tabular_explain import save_global_importance, save_local_explanations, save_type_shap
+from hydra.xai.tabular_explain import save_global_importance, save_local_explanations, save_type_shap
 from hydra.models.baselines import baseline_majority_scores, baseline_threshold_scores
 from hydra.models.tabular import build_lightgbm, build_logreg, build_random_forest, build_sklearn_gbdt, build_xgboost
 from hydra.models.deep import build_cnn_lstm
@@ -422,6 +423,31 @@ def run(args) -> Dict[str, object]:
             seed=seed,
             logger=logger,
             required_labels=required_labels,
+            split_assertions=split_assertions,
+        )
+    elif split_strategy == "host_type_aware":
+        group_col = args.group_col or cfg.group_col
+        if not group_col:
+            raise ValueError("group_col must be provided for host_type_aware split")
+        group_col_used = group_col
+        type_col = args.type_col or cfg.type_col
+        if not type_col:
+            raise ValueError("type_col must be provided for host_type_aware split")
+        normal_type_value = (
+            args.normal_type_value
+            if args.normal_type_value is not None
+            else (cfg.normal_type_value if cfg.normal_type_value is not None else "normal")
+        )
+        train_idx, val_idx, test_idx = split_host_type_aware(
+            df,
+            y,
+            group_col=group_col,
+            type_col=type_col,
+            normal_type_value=normal_type_value,
+            test_size=defaults["split"]["test_size"],
+            val_size=defaults["split"]["val_size"],
+            seed=seed,
+            logger=logger,
             split_assertions=split_assertions,
         )
     else:
@@ -1051,8 +1077,8 @@ def run(args) -> Dict[str, object]:
 
             # --- XAI Evaluation (5 criteria) ---
             try:
-                from hydra.explain.eval_explain import run_xai_eval
-                from hydra.explain.tabular_explain import compute_binary_shap
+                from hydra.xai.record import run_xai_eval
+                from hydra.xai.tabular_explain import compute_binary_shap
 
                 _model_obj  = pipeline.named_steps["model"]
                 _model_type = (
@@ -1070,9 +1096,18 @@ def run(args) -> Dict[str, object]:
 
                 _eval_feat_names = list(feature_names)
 
-                # IG is expensive; reduce stability sample counts for CNN-LSTM
-                _stab_n  = 20 if _model_type == "deep" else 50
-                _stab_np = 5  if _model_type == "deep" else 10
+                # Tree SHAP is expensive (~30s/call on large RF): cap samples hard.
+                # linear (logreg) uses LinearExplainer — near-instant, keep full.
+                # deep (CNN-LSTM) uses IG — moderate cost, keep reduced.
+                if _model_type == "tree":
+                    _max_faith_n = 100
+                    _stab_n, _stab_np = 10, 5
+                elif _model_type == "deep":
+                    _max_faith_n = 200
+                    _stab_n, _stab_np = 20, 5
+                else:  # linear
+                    _max_faith_n = 500
+                    _stab_n, _stab_np = 50, 10
 
                 # predict_fn operates in preprocessed model-input space
                 def _predict_fn(X_arr: np.ndarray) -> np.ndarray:
@@ -1112,6 +1147,7 @@ def run(args) -> Dict[str, object]:
                     dataset_name=args.dataset,
                     out_path=explain_dir / "xai_eval.json",
                     model_name=spec_model.name,
+                    max_faithfulness_samples=_max_faith_n,
                     stability_n_samples=_stab_n,
                     stability_n_perturb=_stab_np,
                     logger=logger,
@@ -1121,7 +1157,7 @@ def run(args) -> Dict[str, object]:
 
             # --- LIME local explanations (model-agnostic comparison baseline) ---
             try:
-                from hydra.explain.tabular_explain import save_lime_explanations
+                from hydra.xai.tabular_explain import save_lime_explanations
                 save_lime_explanations(
                     pipeline,
                     X_train_raw,
@@ -1135,28 +1171,13 @@ def run(args) -> Dict[str, object]:
             except Exception as _lime_exc:
                 logger.warning("LIME failed for %s: %s", spec_model.name, _lime_exc)
 
-            # --- Anchors rule-based explanations (tree / linear models only) ---
-            if spec_model.name in {"random_forest", "lightgbm", "xgboost",
-                                    "sklearn_gbdt", "logreg"}:
-                try:
-                    from hydra.explain.tabular_explain import save_anchors_explanations
-                    save_anchors_explanations(
-                        pipeline,
-                        X_train_raw,
-                        X_val_raw,
-                        feature_names,
-                        out_dir=explain_dir / "local_explanations",
-                        n_samples=20,
-                        random_state=defaults["explain"]["random_state"],
-                        logger=logger,
-                    )
-                except Exception as _anch_exc:
-                    logger.warning("Anchors failed for %s: %s", spec_model.name, _anch_exc)
+            # Anchors disabled: numpy ABI incompatibility (dtype size mismatch)
+            # between alibi's compiled C extension and numpy>=2.0.
 
             # --- Captum LayerConductance (CNN-LSTM only) ---
             if spec_model.name == "cnn_lstm":
                 try:
-                    from hydra.explain.tabular_explain import save_captum_layer_conductance
+                    from hydra.xai.tabular_explain import save_captum_layer_conductance
                     save_captum_layer_conductance(
                         pipeline,
                         X_val_raw,
@@ -1396,7 +1417,7 @@ def run(args) -> Dict[str, object]:
         scores_df.to_csv(run_dir / "test_scores.csv", index=False)
         if len(real_model_scores) >= 2:
             try:
-                from hydra.eval.metrics import delong_pairwise as _delong_pairwise
+                from hydra.evaluation.metrics import delong_pairwise as _delong_pairwise
                 delong_df = _delong_pairwise(np.asarray(y_test, dtype=int), real_model_scores)
                 delong_df.to_csv(run_dir / "delong_tests.csv")
                 logger.info("DeLong pairwise tests saved → delong_tests.csv")
@@ -1468,7 +1489,7 @@ def main():
     parser.add_argument(
         "--split_strategy",
         required=True,
-        choices=["host", "temporal", "stratified", "type_stratified", "group_type_stratified"],
+        choices=["host", "temporal", "stratified", "type_stratified", "group_type_stratified", "host_type_aware"],
     )
     parser.add_argument("--group_col", default=None)
     parser.add_argument("--timestamp_col", default=None)

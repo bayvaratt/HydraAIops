@@ -12,6 +12,7 @@ models:
   - baseline_threshold
   - logreg
   - random_forest
+  - xgboost
   - lightgbm
   - sklearn_gbdt
 explain:

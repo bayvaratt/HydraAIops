@@ -66,7 +66,7 @@ fi
 
 # ---- Output setup -----------------------------------------------------------
 MATRIX_TS=$(date +%Y%m%d_%H%M%S)
-MATRIX_DIR="runs/ton_matrix/${MATRIX_TS}"
+MATRIX_DIR="results/ton_matrix/${MATRIX_TS}"
 mkdir -p "${MATRIX_DIR}"
 MANIFEST="${MATRIX_DIR}/manifest.txt"
 
@@ -134,7 +134,7 @@ for SPLIT in "${SPLITS[@]}"; do
 
         # 1. Baselines — always feature_selection=none (unaffected anyway)
         run_config "${DATASET}/${SPLIT}/seed=${SEED}/baselines" \
-            python -m hydra.pipelines.run_tabular \
+            python -m hydra.experiments.run_tabular \
             --dataset "${DATASET}" \
             --feature_regime "${FEATURE_REGIME}" \
             --split_strategy "${SPLIT}" \
@@ -149,7 +149,7 @@ for SPLIT in "${SPLITS[@]}"; do
 
         # 2. ML models — no feature selection
         run_config "${DATASET}/${SPLIT}/seed=${SEED}/ml-fs=none" \
-            python -m hydra.pipelines.run_tabular \
+            python -m hydra.experiments.run_tabular \
             --dataset "${DATASET}" \
             --feature_regime "${FEATURE_REGIME}" \
             --split_strategy "${SPLIT}" \
@@ -165,7 +165,7 @@ for SPLIT in "${SPLITS[@]}"; do
         # 3. ML models — mutual_info feature selection (k=20, k=40)
         for K in "${FS_K_VALUES[@]}"; do
             run_config "${DATASET}/${SPLIT}/seed=${SEED}/ml-fs=mi-k${K}" \
-                python -m hydra.pipelines.run_tabular \
+                python -m hydra.experiments.run_tabular \
                 --dataset "${DATASET}" \
                 --feature_regime "${FEATURE_REGIME}" \
                 --split_strategy "${SPLIT}" \

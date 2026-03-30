@@ -12,7 +12,7 @@ import pandas as pd
 # Allow running as a script without installing the package.
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from hydra.explain.importance_similarity import compute_rank_similarity, write_similarity_json
+from hydra.xai.importance_similarity import compute_rank_similarity, write_similarity_json
 
 
 def fmt(x, nd=4):

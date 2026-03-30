@@ -1,7 +1,7 @@
 # Update paths and columns to match your local files
 
 ton_iot:
-  path: data/ton_iot/ton_iot.csv
+  path: data/raw/ton_iot/ton_iot.csv
   label_col: label
   positive_label: 1
   type_col: type
@@ -16,7 +16,7 @@ ton_iot:
   dst_pkts_col: dst_pkts
 
 cic_iot2023:
-  path: data/cic_iot2023/cic_iot2023.csv
+  path: data/raw/cic_iot2023/cic_iot2023.csv
   label_col: label
   positive_label: 1
   type_col: type

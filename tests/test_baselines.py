@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from hydra.eval.metrics import compute_pr_auc
+from hydra.evaluation.metrics import compute_pr_auc
 from hydra.models.baselines import baseline_majority_scores
 
 

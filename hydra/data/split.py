@@ -376,3 +376,117 @@ def split_group_stratified_by_label(
         "all required labels in train and test) "
         f"after {max_attempts} attempts. Consider relaxing constraints."
     )
+
+
+def split_host_type_aware(
+    df: pd.DataFrame,
+    y: pd.Series,
+    group_col: str,
+    type_col: str,
+    normal_type_value: str,
+    test_size: float,
+    val_size: float,
+    seed: int,
+    logger,
+    max_attempts: int = 50,
+    split_assertions: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Host-disjoint split that guarantees all attack types appear in train.
+
+    Algorithm
+    ---------
+    1. For each attack type, find the host with the most samples of that type.
+    2. Greedily pin one representative host per type to train (rarest type
+       first so covering a rare type also covers common co-located types).
+    3. Fill remaining train slots randomly from the unpinned hosts.
+    4. Assign leftover hosts to val/test randomly, retrying until both splits
+       have ≥ MIN_POS positive and ≥ MIN_NEG negative samples.
+
+    This is strictly stronger than `split_host` (all types in train guaranteed)
+    while avoiding the infeasibility of `split_group_stratified_by_label`
+    (which also requires all types in test — impossible for TON_IoT).
+    """
+    if group_col not in df.columns:
+        raise KeyError(f"group_col '{group_col}' not found")
+    if type_col not in df.columns:
+        raise KeyError(f"type_col '{type_col}' not found")
+
+    groups = df[group_col]
+    types = df[type_col]
+    unique_groups = list(groups.unique())
+    n_total = len(unique_groups)
+    n_test = max(int(round(n_total * test_size)), 1)
+    n_val = max(int(round(n_total * val_size)), 1)
+    n_train = max(n_total - n_test - n_val, 1)
+
+    MIN_POS = 50
+    MIN_NEG = 50
+
+    # Build map: attack_type → [(host, count), ...] sorted by count desc
+    attack_mask = types != normal_type_value
+    type_host_counts: dict[str, list[tuple]] = {}
+    for host in unique_groups:
+        host_mask = groups == host
+        for t, c in types[host_mask & attack_mask].value_counts().items():
+            type_host_counts.setdefault(str(t), []).append((host, int(c)))
+    for t in type_host_counts:
+        type_host_counts[t].sort(key=lambda x: -x[1])
+
+    # Greedy pin — rarest type (fewest hosting hosts) first
+    pinned: set = set()
+    covered: set = set()
+    for t in sorted(type_host_counts, key=lambda t: len(type_host_counts[t])):
+        if t in covered:
+            continue
+        # Prefer already-pinned hosts (free coverage); else pin the best host
+        chosen = next(
+            (h for h, _ in type_host_counts[t] if h in pinned),
+            type_host_counts[t][0][0],  # best host by sample count
+        )
+        pinned.add(chosen)
+        # Mark all types this host covers as covered
+        for t2, hlist in type_host_counts.items():
+            if any(h == chosen for h, _ in hlist):
+                covered.add(t2)
+
+    logger.info(
+        "Type-aware host split: %d hosts pinned to train for attack-type coverage: %s",
+        len(pinned),
+        sorted(str(h) for h in pinned),
+    )
+    if len(pinned) > n_train:
+        raise RuntimeError(
+            f"Need {len(pinned)} pinned hosts but only {n_train} train slots available."
+        )
+
+    remaining = [h for h in unique_groups if h not in pinned]
+
+    def _counts_ok(idx: np.ndarray) -> bool:
+        yy = y.iloc[idx]
+        return int((yy == 1).sum()) >= MIN_POS and int((yy == 0).sum()) >= MIN_NEG
+
+    for attempt in range(max_attempts):
+        rng = np.random.default_rng(seed + attempt)
+        shuffled = list(rng.permutation(remaining))
+
+        n_extra_train = n_train - len(pinned)
+        train_groups = pinned | set(shuffled[:n_extra_train])
+        leftover = shuffled[n_extra_train:]
+        val_groups = set(leftover[:n_val])
+        test_groups = set(leftover[n_val: n_val + n_test])
+
+        train_idx = np.flatnonzero(groups.isin(train_groups))
+        val_idx = np.flatnonzero(groups.isin(val_groups))
+        test_idx = np.flatnonzero(groups.isin(test_groups))
+
+        if not (len(train_idx) and len(val_idx) and len(test_idx)):
+            continue
+        if _counts_ok(train_idx) and _counts_ok(val_idx) and _counts_ok(test_idx):
+            check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
+            if split_assertions:
+                _check_split_invariants(y, train_idx, val_idx, test_idx, logger)
+            return train_idx, val_idx, test_idx
+
+    raise RuntimeError(
+        f"Type-aware host split failed to find valid val/test prevalence after {max_attempts} attempts."
+    )

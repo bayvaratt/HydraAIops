@@ -3,11 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+
+
+def _log1p_nonneg(X: np.ndarray) -> np.ndarray:
+    """log1p after clipping negatives to 0 — safe for all network flow numerics."""
+    return np.log1p(np.clip(X, 0, None))
 
 
 @dataclass
@@ -210,7 +216,16 @@ def fit_preprocessor(
     categorical_cols: List[str],
     numeric_cols: List[str],
 ) -> ColumnTransformer:
-    numeric_pipeline = SimpleImputer(strategy="median")
+    # Numeric: impute → log1p (compresses right-skewed flow volumes) → z-score scale.
+    # log1p clips negatives to 0 first — safe for bytes/packets/duration.
+    # Tree models are scale-invariant so StandardScaler doesn't hurt them;
+    # logreg and CNN-LSTM benefit significantly from both steps.
+    numeric_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("log1p",   FunctionTransformer(_log1p_nonneg, validate=True,
+                                       feature_names_out="one-to-one")),
+        ("scaler",  StandardScaler()),
+    ])
     categorical_pipeline = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),

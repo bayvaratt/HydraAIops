@@ -55,7 +55,7 @@ def compute_binary_shap(
 
     try:
         if model_type == "deep":
-            from hydra.explain.integrated_gradients import integrated_gradients_batch
+            from hydra.xai.integrated_gradients import integrated_gradients_batch
             import torch
             dev = device if device is not None else torch.device("cpu")
             return integrated_gradients_batch(
@@ -74,7 +74,7 @@ def compute_binary_shap(
 
         # model_type == "tree" (RF, XGBoost, LightGBM, sklearn_gbdt)
         explainer = shap.TreeExplainer(model)
-        sv = explainer.shap_values(X_dense)
+        sv = explainer.shap_values(X_dense, check_additivity=False)
         if isinstance(sv, list):
             # list of arrays: one per class — take positive class (last)
             return np.asarray(sv[-1], dtype=np.float32)
@@ -212,6 +212,16 @@ def save_global_importance(
             logger.warning("CNN-LSTM gradient×input importance also failed (%s); skipping", exc2)
         return
 
+    # Logistic regression: use |coef_| as feature importance (instant, interpretable)
+    if hasattr(model, "coef_"):
+        coef = np.asarray(model.coef_, dtype=float)
+        importances = np.abs(coef).mean(axis=0)  # mean over classes for multiclass
+        if importances.shape[0] == len(feature_names):
+            df = pd.DataFrame({"feature": feature_names, "importance": importances})
+            df.sort_values("importance", ascending=False).to_csv(out_path, index=False)
+            logger.info("Saved logreg |coef_| global importance to %s", out_path)
+            return
+
     if hasattr(model, "feature_importances_"):
         importances = np.asarray(model.feature_importances_, dtype=float)
         if importances.shape[0] != len(feature_names):
@@ -337,10 +347,21 @@ def save_local_explanations(
     try:
         import shap  # noqa: F401
 
+        # Always convert to dense float32 — sparse/object arrays cause isnan cast errors
+        X_dense_shap = X_trans.toarray() if hasattr(X_trans, "toarray") else np.asarray(X_trans)
+        X_dense_shap = np.asarray(X_dense_shap, dtype=np.float32)
+
         logger.info("Using SHAP for local explanations")
         try:
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_trans)
+            from sklearn.linear_model import LogisticRegression
+            _is_linear = isinstance(model, LogisticRegression)
+            if _is_linear:
+                masker = shap.maskers.Independent(X_dense_shap, max_samples=min(100, len(X_dense_shap)))
+                explainer = shap.LinearExplainer(model, masker)
+                shap_values = explainer.shap_values(X_dense_shap)
+            else:
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(X_dense_shap, check_additivity=False)
             if hasattr(shap_values, "values"):
                 shap_values = shap_values.values
             if isinstance(shap_values, list):

@@ -6,12 +6,12 @@ target dataset.  The PR-AUC drop from source_test → target quantifies how well
 learned patterns generalise across network environments.
 
 Usage:
-    python -m hydra.pipelines.run_cross_dataset \\
+    python -m hydra.experiments.run_cross_dataset \\
         --source ton_iot --target cic_iot2023 \\
         --models logreg random_forest xgboost \\
         --seed 42 --max_rows_source 50000 --max_rows_target 50000
 
-    python -m hydra.pipelines.run_cross_dataset \\
+    python -m hydra.experiments.run_cross_dataset \\
         --source cic_iot2023 --target ton_iot \\
         --models logreg random_forest xgboost --seed 42
 """
@@ -34,7 +34,7 @@ from sklearn.preprocessing import StandardScaler
 
 from hydra.data.align import ALIGNERS, CANONICAL_FEATURES
 from hydra.data.io import load_dataset
-from hydra.eval.metrics import compute_pr_auc, compute_roc_auc
+from hydra.evaluation.metrics import compute_pr_auc, compute_roc_auc
 from hydra.models.tabular import (
     build_lightgbm,
     build_logreg,

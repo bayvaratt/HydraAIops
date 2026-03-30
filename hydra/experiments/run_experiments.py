@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import yaml
 
-from hydra.pipelines.run_tabular import run
+from hydra.experiments.run_tabular import run
 
 
 def _has_timestamp_col(dataset_path: str, timestamp_col: str | None) -> bool:
