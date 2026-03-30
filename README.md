@@ -1,52 +1,78 @@
-# 🐍 HYDRA: Neuro-Symbolic AIOps & Cyber Defense
+# HYDRA: Explainability-Driven Intrusion Detection
 
-**HYDRA** is a hybrid intrusion detection system (IDS) that combines **Machine Learning (Neuro)** with **Knowledge Graph policies (Symbolic)** to detect, predict, and explain cyber threats. It addresses the "black box" problem in AIOps by enforcing logic constraints and context-aware reasoning on top of deep learning alerts.
+This repo provides a clean, reproducible experimental pipeline for binary intrusion detection on tabular network-flow data. Explanations are first-class outputs (global + local). The pipeline emphasizes leakage-safe splits, honest baselines, and deterministic runs.
 
----
+## Quickstart
 
-## 🏗️ Architecture
-
-HYDRA operates using a "Multi-Head" architecture where different AI models specialize in specific data types, unified by a neuro-symbolic reasoning engine.
-
-1.  **Statistical Head (Network Flows):**
-    * **Data:** TON_IoT (Netflow/Telemetry).
-    * **Model:** Random Forest / XGBoost.
-    * **Goal:** Detect high-volume volumetric attacks (DDoS, Scanning, Backdoors).
-
-2.  **Semantic Head (System Logs):**
-    * **Data:** HDFS / LogHub (Unstructured Text).
-    * **Model:** TF-IDF + Isolation Forest (Unsupervised).
-    * **Goal:** Detect rare system states, error sequences, and unknown "zero-day" anomalies.
-
-3.  **Predictive Head (Lateral Movement):**
-    * **Data:** LANL Unified Host & Network (Authentication Graphs).
-    * **Model:** Graph Link Prediction (Adamic-Adar / Jaccard).
-    * **Goal:** Predict and detect unauthorized user movement between network clusters (e.g., HR $\to$ Engineering).
-
-4.  **🧠 Head of Wisdom (Reasoning Core):**
-    * **Tech:** Symbolic Logic & Policy Engine.
-    * **Goal:** Contextualizes alerts. Instead of just flagging an anomaly, it checks asset criticality and user roles to generate human-readable explanations (e.g., *"Intern violating Policy-002 by accessing Critical Server"*).
-
----
-
-## 📂 Project Structure
-
+Single run:
 ```bash
-hydra-aiops/
-├── data/
-│   ├── raw/                 # Place datasets here (auth.txt.gz, HDFS.log, Train_Test_Network.csv)
-│   └── processed/           # Cleaned data (if applicable)
-├── notebooks/
-│   ├── 01_statistical_exploration.ipynb  # Training the Network Model
-│   ├── 02_semantic_exploration.ipynb     # Training the Log Parser & Anomaly Detector
-│   └── 03_predictive_exploration.ipynb   # Graph visualization & Link Prediction experiments
-├── src/
-│   ├── models/              # Saved .pkl models and training scripts
-│   │   ├── predictive_head.py
-│   │   └── ...
-│   ├── wisdom/
-│   │   └── core.py          # The Neuro-Symbolic Logic Engine
-│   └── utils/
-│       └── generate_dummy_lanl.py  # Script to generate synthetic graph data for testing
-├── app.py                   # Main Streamlit Dashboard
-└── requirements.txt         # Python dependencies
+python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behaviour_only --split_strategy host --group_col src_ip --seed 42
+```
+
+Permutation leakage probe:
+```bash
+python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behaviour_only --split_strategy host --group_col src_ip --seed 42 --label_permutation_probe
+```
+ROC-AUC under a null permutation is symmetric around 0.5, so the probe checks absolute deviation from 0.5 with a dynamic tolerance based on test-set class counts. Use `--permutation_repeats N` (default 3) to average over multiple shuffles.
+
+Duplicate leakage audit:
+Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. The default train→test overlap rate uses the test-set denominator (by_test). Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail if train→test overlap exceeds the threshold. Both by_test and by_train rates are recorded in `evaluation_meta.json`.
+
+Decision metrics:
+- `pr_lift = pr_auc - prevalence_test`
+- `precision@recall=0.90` uses a threshold chosen on validation to maximize precision while meeting recall≥0.90 (or max recall if the target is unreachable).
+Note: when `HYDRA_DISABLE_LIGHTGBM=1`, the `lightgbm` slot uses a `sklearn_gbdt` fallback (GradientBoostingClassifier) and logs the backend used.
+
+Matrix runner:
+```bash
+python -m hydra.pipelines.run_experiments --dataset ton_iot --max_rows 5000 --seed 42 --label_permutation_probe
+```
+
+Consolidate results:
+```bash
+python scripts/consolidate_results.py --runs_dir runs/ton_iot --out_dir runs/ton_iot/consolidated
+```
+
+Paper replication (Dharini et al., 2026):
+```bash
+python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime paper_5feat --split_strategy host --group_col src_ip --seed 42
+```
+
+Paper comparison matrix:
+```bash
+python -m hydra.pipelines.run_experiments --dataset ton_iot --seed 42 --max_rows 5000 --include_paper_comparison
+```
+
+## Dataset configuration
+Edit `hydra/config/datasets.yaml` to point to your local dataset paths and columns. The loader supports `.csv` and `.parquet`.
+
+Required per dataset:
+- `path`: local file path
+- `label_col`: binary label column
+- `positive_label`: value mapped to 1 (e.g., 1 or "attack")
+
+Optional:
+- `timestamp_col`
+- `group_col` (default for host split)
+- `duration_col`, `src_bytes_col`, `dst_bytes_col`, `src_pkts_col`, `dst_pkts_col` (for baseline_threshold)
+- `categorical_cols` and `numeric_cols` (overrides inference)
+
+## Notes
+- Splits:
+  - `host`: GroupShuffleSplit with strict disjointness checks.
+  - `temporal`: chronological split (train/val/test).
+  - `stratified`: allowed only as a naive baseline (labeled not deployment-realistic).
+- LightGBM is optional; if unavailable, a fallback model is used with identical interface.
+- Explainability:
+  - Global importance via built-in or permutation importance.
+  - Local explanations via SHAP if available; otherwise a deterministic occlusion fallback.
+
+## Installation
+Base dependencies:
+```bash
+pip install -e .
+```
+Optional:
+```bash
+pip install -e .[lightgbm,shap,plots]
+```

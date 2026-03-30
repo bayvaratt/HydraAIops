@@ -1,0 +1,63 @@
+# Update paths and columns to match your local files
+
+ton_iot:
+  path: data/raw/ton_iot/ton_iot.csv
+  label_col: label
+  positive_label: 1
+  type_col: type
+  normal_type_value: normal
+  timestamp_col: timestamp
+  group_col: src_ip
+  dst_ip_col: dst_ip
+  duration_col: duration
+  src_bytes_col: src_bytes
+  dst_bytes_col: dst_bytes
+  src_pkts_col: src_pkts
+  dst_pkts_col: dst_pkts
+
+cic_iot2023:
+  path: data/raw/cic_iot2023/cic_iot2023.csv
+  label_col: label
+  positive_label: 1
+  type_col: type
+  normal_type_value: BENIGN
+  # No src_ip/timestamp columns in CIC-IoT-2023; use stratified split
+  # Baseline threshold columns (closest available; no traditional flow stats)
+  src_pkts_col: number
+  # 34-class → 8 macro-category mapping (matches CICIoT2023 benchmark paper grouping)
+  # Use --type_col type_macro in the pipeline CLI for 8-class multiclass evaluation.
+  type_mapping:
+    DDOS-ICMP_FLOOD: DDoS
+    DDOS-UDP_FLOOD: DDoS
+    DDOS-PSHACK_FLOOD: DDoS
+    DDOS-SYN_FLOOD: DDoS
+    DDOS-TCP_FLOOD: DDoS
+    DDOS-RSTFINFLOOD: DDoS
+    DDOS-SYNONYMOUSIP_FLOOD: DDoS
+    DDOS-ICMP_FRAGMENTATION: DDoS
+    DDOS-ACK_FRAGMENTATION: DDoS
+    DDOS-UDP_FRAGMENTATION: DDoS
+    DDOS-HTTP_FLOOD: DDoS
+    DDOS-SLOWLORIS: DDoS
+    DOS-UDP_FLOOD: DoS
+    DOS-TCP_FLOOD: DoS
+    DOS-SYN_FLOOD: DoS
+    DOS-HTTP_FLOOD: DoS
+    MIRAI-GREETH_FLOOD: Mirai
+    MIRAI-UDPPLAIN: Mirai
+    MIRAI-GREIP_FLOOD: Mirai
+    VULNERABILITYSCAN: Recon
+    RECON-HOSTDISCOVERY: Recon
+    RECON-OSSCAN: Recon
+    RECON-PORTSCAN: Recon
+    RECON-PINGSWEEP: Recon
+    SQLINJECTION: Web
+    COMMANDINJECTION: Web
+    XSS: Web
+    BACKDOOR_MALWARE: Web
+    UPLOADING_ATTACK: Web
+    BROWSERHIJACKING: Web
+    DICTIONARYBRUTEFORCE: BruteForce
+    MITM-ARPSPOOFING: Spoofing
+    DNS_SPOOFING: Spoofing
+    BENIGN: BENIGN

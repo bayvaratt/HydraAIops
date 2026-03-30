@@ -1,0 +1,29 @@
+[project]
+name = "hydra-ids"
+version = "0.1.0"
+description = "HYDRA: Explainability-Driven Intrusion Detection"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "HYDRA"}]
+
+dependencies = [
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "scikit-learn>=1.2",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+lightgbm = ["lightgbm>=4.0"]
+xgboost = ["xgboost>=1.7"]
+shap = ["shap>=0.42"]
+plots = ["matplotlib>=3.7"]
+torch = ["torch>=2.0"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
