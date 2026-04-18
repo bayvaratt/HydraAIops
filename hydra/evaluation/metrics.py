@@ -1,21 +1,46 @@
+"""Evaluation metrics for binary intrusion detection.
+
+Provides PR-AUC, ROC-AUC, Brier score, log-loss, KS statistic, DeLong
+paired AUC tests, and sanity-check utilities for the HYDRA pipeline.
+"""
 from __future__ import annotations
 
 import hashlib
+import logging
+from typing import Union
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
-ROC_AUC_TOL_SMALL = 0.10
-ROC_AUC_TOL_MED = 0.05
-ROC_AUC_TOL_LARGE = 0.03
+# Permutation-probe null-tolerance thresholds: how far ROC-AUC may deviate
+# from 0.5 under a shuffled-label null before we flag leakage.
+# Wider tolerance for smaller test sets (higher sampling variance).
+ROC_AUC_TOL_SMALL = 0.10   # minority class < 200 samples
+ROC_AUC_TOL_MED = 0.05     # minority class 200–999 samples
+ROC_AUC_TOL_LARGE = 0.03   # minority class >= 1000 samples
+SMALL_CLASS_THRESHOLD = 200
+MEDIUM_CLASS_THRESHOLD = 1000
+
 PR_AUC_TOL = 0.10
 
+# Threshold for flagging PR-AUC / prevalence mismatch in sanity checks
+PREVALENCE_DEVIATION_THRESHOLD = 0.05
 
-def compute_pr_auc(y_true, scores):
+ArrayLike = Union[np.ndarray, pd.Series, list]
+
+
+def compute_pr_auc(y_true: ArrayLike, scores: ArrayLike) -> float:
+    """Compute area under the precision-recall curve (average precision)."""
     return float(average_precision_score(y_true, scores))
 
 
-def pr_auc_sanity_check(y_true, eps: float = 1e-6):
+def pr_auc_sanity_check(y_true: ArrayLike, eps: float = 1e-6) -> None:
+    """Verify PR-AUC calculation consistency.
+
+    Scores a constant-prevalence vector and checks that AP matches prevalence.
+    Raises RuntimeError if the deviation exceeds *eps*.
+    """
     y = np.asarray(y_true)
     prevalence = float(np.mean(y)) if len(y) else 0.0
     const_scores = np.full(len(y), prevalence, dtype=float)
@@ -24,7 +49,10 @@ def pr_auc_sanity_check(y_true, eps: float = 1e-6):
         raise RuntimeError("PR-AUC calculation inconsistent — check pos_label / score column")
 
 
-def compute_roc_auc(y_true, scores, logger):
+def compute_roc_auc(
+    y_true: ArrayLike, scores: ArrayLike, logger: logging.Logger
+) -> float:
+    """Compute ROC-AUC, returning NaN for degenerate inputs."""
     if len(np.unique(y_true)) < 2:
         logger.warning("ROC-AUC undefined: only one class present")
         return float("nan")
@@ -34,16 +62,21 @@ def compute_roc_auc(y_true, scores, logger):
     return float(roc_auc_score(y_true, scores))
 
 
-def compute_brier(y_true, scores):
+def compute_brier(y_true: ArrayLike, scores: ArrayLike) -> float:
+    """Compute Brier score (mean squared error of probability estimates)."""
     return float(brier_score_loss(y_true, scores))
 
 
-def compute_log_loss(y_true, scores, eps: float = 1e-12):
+def compute_log_loss(
+    y_true: ArrayLike, scores: ArrayLike, eps: float = 1e-12
+) -> float:
+    """Compute log-loss with score clipping for numerical stability."""
     scores = np.clip(scores, eps, 1.0 - eps)
     return float(log_loss(y_true, scores, labels=[0, 1]))
 
 
-def compute_ks_statistic(y_true, scores):
+def compute_ks_statistic(y_true: ArrayLike, scores: ArrayLike) -> float:
+    """Compute Kolmogorov-Smirnov statistic between positive and negative score distributions."""
     y = np.asarray(y_true)
     s = np.asarray(scores)
     pos = s[y == 1]
@@ -58,27 +91,34 @@ def compute_ks_statistic(y_true, scores):
     return float(np.max(np.abs(cdf_pos - cdf_neg)))
 
 
-def roc_auc_null_tolerance(y_true) -> float:
+def roc_auc_null_tolerance(y_true: ArrayLike) -> float:
+    """Return permutation-probe tolerance based on minority class size."""
     y = np.asarray(y_true)
     n_pos = int(np.sum(y == 1))
     n_neg = int(np.sum(y == 0))
     min_count = min(n_pos, n_neg)
-    if min_count < 200:
+    if min_count < SMALL_CLASS_THRESHOLD:
         return ROC_AUC_TOL_SMALL
-    if min_count < 1000:
+    if min_count < MEDIUM_CLASS_THRESHOLD:
         return ROC_AUC_TOL_MED
     return ROC_AUC_TOL_LARGE
 
 
-def warn_on_constant_scores(scores, pr_auc, prevalence, logger):
+def warn_on_constant_scores(
+    scores: ArrayLike, pr_auc: float, prevalence: float, logger: logging.Logger
+) -> None:
+    """Log a warning if scores are constant and PR-AUC deviates from prevalence."""
     if np.var(scores) == 0:
         logger.warning("constant score detected")
-        if abs(pr_auc - prevalence) > 0.05:
+        if abs(pr_auc - prevalence) > PREVALENCE_DEVIATION_THRESHOLD:
             logger.warning("PR-AUC deviates from prevalence under constant scores: pr_auc=%.4f prevalence=%.4f", pr_auc, prevalence)
 
 
-def majority_baseline_sanity(pr_auc, prevalence, logger):
-    if abs(pr_auc - prevalence) > 0.05:
+def majority_baseline_sanity(
+    pr_auc: float, prevalence: float, logger: logging.Logger
+) -> None:
+    """Log a warning if majority-baseline PR-AUC deviates from prevalence."""
+    if abs(pr_auc - prevalence) > PREVALENCE_DEVIATION_THRESHOLD:
         logger.warning(
             "Majority baseline PR-AUC differs from prevalence: pr_auc=%.4f prevalence=%.4f",
             pr_auc,

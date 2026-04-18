@@ -1,10 +1,31 @@
+"""Split strategies for train/val/test partitioning.
+
+Provides host-disjoint, temporal, stratified, and type-aware splits with
+prevalence constraints and post-split invariant checks.
+"""
 from __future__ import annotations
 
+import logging
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedShuffleSplit
+
+# Prevalence constraints for host split: each split's prevalence must
+# fall within [MIN_SPLIT_PREVALENCE, MAX_SPLIT_PREVALENCE] and within
+# MAX_PREVALENCE_GAP of the overall dataset prevalence.
+MIN_SPLIT_PREVALENCE = 0.05
+MAX_SPLIT_PREVALENCE = 0.95
+MAX_PREVALENCE_GAP = 0.20
+
+# Minimum absolute counts of positive/negative samples per split.
+# 50 positives in val is enough for meaningful threshold calibration.
+MIN_POS_PER_SPLIT = 50
+MIN_NEG_PER_SPLIT = 50
+
+# Maximum host-split retry attempts before raising RuntimeError
+MAX_HOST_SPLIT_ATTEMPTS = 50
 
 
 def _top_groups(groups: pd.Series, idx: np.ndarray, top_n: int = 10):
@@ -133,10 +154,7 @@ def split_host(
         logger.warning("Insufficient groups per label-bin for stratified group split; using random group split.")
 
     train_idx = val_idx = test_idx = None
-    min_prev = 0.05
-    max_prev = 0.95
-    max_gap = 0.20
-    for attempt in range(50):
+    for attempt in range(MAX_HOST_SPLIT_ATTEMPTS):
         attempt_seed = seed + attempt
         try:
             if can_stratify:
@@ -160,12 +178,12 @@ def split_host(
             test_prev = float(y.iloc[test_idx].mean())
             prevalence_ok = all(
                 [
-                    min_prev <= train_prev <= max_prev,
-                    min_prev <= val_prev <= max_prev,
-                    min_prev <= test_prev <= max_prev,
-                    abs(train_prev - overall_prev) <= max_gap,
-                    abs(val_prev - overall_prev) <= max_gap,
-                    abs(test_prev - overall_prev) <= max_gap,
+                    MIN_SPLIT_PREVALENCE <= train_prev <= MAX_SPLIT_PREVALENCE,
+                    MIN_SPLIT_PREVALENCE <= val_prev <= MAX_SPLIT_PREVALENCE,
+                    MIN_SPLIT_PREVALENCE <= test_prev <= MAX_SPLIT_PREVALENCE,
+                    abs(train_prev - overall_prev) <= MAX_PREVALENCE_GAP,
+                    abs(val_prev - overall_prev) <= MAX_PREVALENCE_GAP,
+                    abs(test_prev - overall_prev) <= MAX_PREVALENCE_GAP,
                 ]
             )
             if (
@@ -179,7 +197,7 @@ def split_host(
 
     if train_idx is None or val_idx is None or test_idx is None:
         raise RuntimeError(
-            "Host split failed to meet class coverage/prevalence constraints after 50 attempts."
+            f"Host split failed to meet class coverage/prevalence constraints after {MAX_HOST_SPLIT_ATTEMPTS} attempts."
         )
 
     check_group_disjointness(groups, train_idx, val_idx, test_idx, logger)
@@ -327,20 +345,12 @@ def split_group_stratified_by_label(
     n_val = max(n_val, 1)
     n_train = max(n_total - n_test - n_val, 1)
 
-    # Minimum absolute counts per split — flat count, not fraction.
-    # TON_IoT has skewed per-host distributions: "attacker" hosts are ~100% attack,
-    # "normal" hosts are ~100% benign. A fraction-based bound (e.g. 0.5%) requires
-    # >1000 positives in val, which is impossible when all remaining hosts are normal.
-    # 50 positives in val is enough for meaningful threshold calibration.
-    MIN_POS = 50
-    MIN_NEG = 50
-
     def _labels_in(idx: np.ndarray) -> set:
         return set(labels.iloc[idx].dropna().unique().tolist())
 
     def _counts_ok(idx: np.ndarray) -> bool:
         yy = y.iloc[idx]
-        return int((yy == 1).sum()) >= MIN_POS and int((yy == 0).sum()) >= MIN_NEG
+        return int((yy == 1).sum()) >= MIN_POS_PER_SPLIT and int((yy == 0).sum()) >= MIN_NEG_PER_SPLIT
 
     for attempt in range(max_attempts):
         rng = np.random.default_rng(seed + attempt)
@@ -421,9 +431,6 @@ def split_host_type_aware(
     n_val = max(int(round(n_total * val_size)), 1)
     n_train = max(n_total - n_test - n_val, 1)
 
-    MIN_POS = 50
-    MIN_NEG = 50
-
     # Build map: attack_type → [(host, count), ...] sorted by count desc
     attack_mask = types != normal_type_value
     type_host_counts: dict[str, list[tuple]] = {}
@@ -465,7 +472,7 @@ def split_host_type_aware(
 
     def _counts_ok(idx: np.ndarray) -> bool:
         yy = y.iloc[idx]
-        return int((yy == 1).sum()) >= MIN_POS and int((yy == 0).sum()) >= MIN_NEG
+        return int((yy == 1).sum()) >= MIN_POS_PER_SPLIT and int((yy == 0).sum()) >= MIN_NEG_PER_SPLIT
 
     for attempt in range(max_attempts):
         rng = np.random.default_rng(seed + attempt)

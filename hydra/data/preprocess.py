@@ -1,3 +1,9 @@
+"""Data preprocessing: feature specification, type inference, and sklearn pipelines.
+
+Handles column selection by feature regime, port bucketing, type inference,
+and fitting ColumnTransformer pipelines (impute → log1p → scale for numerics,
+impute → one-hot for categoricals).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +15,20 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+
+# Text detection thresholds: columns with mean string length > this or
+# max string length > MAX_TEXT_LENGTH are classified as free-text.
+AVG_TEXT_LENGTH_THRESHOLD = 30
+MAX_TEXT_LENGTH_THRESHOLD = 100
+
+# Categorical columns with more unique values than this are considered
+# high-cardinality and dropped in behaviour_only/operational regimes.
+HIGH_CARDINALITY_THRESHOLD = 50
+
+# IANA port ranges for bucket_port()
+PORT_WELL_KNOWN_MAX = 1023
+PORT_REGISTERED_MAX = 49151
+PORT_DYNAMIC_MAX = 65535
 
 
 def _log1p_nonneg(X: np.ndarray) -> np.ndarray:
@@ -49,7 +69,7 @@ def _is_text_col(series: pd.Series) -> bool:
         return False
     avg_len = sample.map(len).mean()
     max_len = sample.map(len).max()
-    return avg_len > 30 or max_len > 100
+    return avg_len > AVG_TEXT_LENGTH_THRESHOLD or max_len > MAX_TEXT_LENGTH_THRESHOLD
 
 
 def _high_cardinality(series: pd.Series) -> bool:
@@ -57,7 +77,7 @@ def _high_cardinality(series: pd.Series) -> bool:
     if n == 0:
         return False
     nunique = series.nunique(dropna=True)
-    return nunique > 50
+    return nunique > HIGH_CARDINALITY_THRESHOLD
 
 
 def _match_cols(cols: List[str], needles: List[str]) -> List[str]:
@@ -73,9 +93,9 @@ def bucket_port(port_series: pd.Series) -> pd.Series:
     vals = pd.to_numeric(port_series, errors="coerce")
     buckets = pd.Series(index=port_series.index, dtype="object")
     buckets[:] = "unknown"
-    buckets[(vals >= 0) & (vals <= 1023)] = "well_known"
-    buckets[(vals >= 1024) & (vals <= 49151)] = "registered"
-    buckets[(vals >= 49152) & (vals <= 65535)] = "dynamic"
+    buckets[(vals >= 0) & (vals <= PORT_WELL_KNOWN_MAX)] = "well_known"
+    buckets[(vals >= PORT_WELL_KNOWN_MAX + 1) & (vals <= PORT_REGISTERED_MAX)] = "registered"
+    buckets[(vals >= PORT_REGISTERED_MAX + 1) & (vals <= PORT_DYNAMIC_MAX)] = "dynamic"
     return buckets
 
 

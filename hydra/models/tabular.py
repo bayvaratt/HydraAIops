@@ -68,11 +68,12 @@ def build_xgboost(random_state: int, scale_pos_weight: float = 1.0) -> ModelSpec
     try:
         model = _build_xgboost_model(random_state, scale_pos_weight=scale_pos_weight)
         return ModelSpec(name="xgboost", backend="xgboost", model=model)
-    except Exception as exc:
+    except ImportError as exc:
         raise RuntimeError("xgboost is not available; install xgboost to use this model.") from exc
 
 
 def build_lightgbm(random_state: int, scale_pos_weight: float = 1.0) -> ModelSpec:
+    """Build a LightGBM model with cascading fallback: lightgbm → xgboost → sklearn HistGBDT."""
     if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
         spec = build_sklearn_gbdt(random_state)
         return ModelSpec(name="lightgbm", backend="sklearn_gbdt", model=spec.model)
@@ -91,14 +92,14 @@ def build_lightgbm(random_state: int, scale_pos_weight: float = 1.0) -> ModelSpe
             num_threads=1,
         )
         return ModelSpec(name="lightgbm", backend="lightgbm", model=model)
-    except Exception:
-        pass
+    except ImportError:
+        pass  # lightgbm not installed; try xgboost fallback
 
     try:
         model = _build_xgboost_model(random_state, scale_pos_weight=scale_pos_weight)
         return ModelSpec(name="lightgbm", backend="xgboost", model=model)
-    except Exception:
-        pass
+    except ImportError:
+        pass  # xgboost not installed; use sklearn fallback
 
     model = HistGradientBoostingClassifier(
         max_depth=8,

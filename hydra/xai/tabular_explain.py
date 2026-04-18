@@ -86,7 +86,8 @@ def compute_binary_shap(
             return sv[:, :, -1].astype(np.float32)
         return sv.astype(np.float32)
 
-    except Exception:
+    except (ValueError, TypeError, RuntimeError, ImportError) as exc:
+        # Attribution may fail for unsupported model types or data shapes
         return None
 
 
@@ -375,7 +376,7 @@ def save_local_explanations(
             return
         except Exception as e:
             logger.warning("SHAP failed (%s); falling back to occlusion", e)
-    except Exception:
+    except ImportError:
         logger.info("SHAP not available; using occlusion fallback")
 
     # Occlusion fallback: ablate each feature and measure delta.
