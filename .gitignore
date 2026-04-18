@@ -3,13 +3,8 @@ data/
 runs/
 results/
 
-# Generated artifacts (intermediate CSVs, models, plots)
-X_*.csv
-y_*.csv
-cnn_lstm_*
-preprocessing_metadata.pkl
-class_distribution.png
-metrics_summary.csv
+# Generated artifacts
+artifacts/
 
 # Dissertation (LaTeX build artifacts)
 dissertation/*.aux
