@@ -3,128 +3,87 @@ from __future__ import annotations
 import numpy as np
 
 
-def select_threshold_at_recall(y_true, scores, target_recall, logger):
-    y_true = np.asarray(y_true)
-    scores = np.asarray(scores)
-
-    if len(np.unique(y_true)) < 2:
-        logger.warning("Only one class present in validation labels; threshold selection is ill-defined")
-        return float(np.nan)
-
-    order = np.argsort(-scores)
-    y_sorted = y_true[order]
-    scores_sorted = scores[order]
-
-    tp = 0
-    total_pos = y_true.sum()
-    best_threshold = scores_sorted[-1]
-
-    for i, s in enumerate(scores_sorted):
-        if y_sorted[i] == 1:
-            tp += 1
-        recall = tp / max(total_pos, 1)
-        if recall >= target_recall:
-            best_threshold = s
-            break
-
-    if tp / max(total_pos, 1) < target_recall:
-        logger.warning("Target recall %.2f not reached; using lowest threshold", target_recall)
-        best_threshold = scores_sorted[-1]
-
-    return float(best_threshold)
+def _as_arrays(y_true, scores) -> tuple[np.ndarray, np.ndarray]:
+    y = np.asarray(y_true, dtype=int)
+    s = np.asarray(scores, dtype=float)
+    if y.shape[0] != s.shape[0]:
+        raise ValueError("y_true and scores must have the same length")
+    return y, s
 
 
-def select_threshold_max_precision_at_recall(y_true, scores, target_recall, logger):
-    y_true = np.asarray(y_true)
-    scores = np.asarray(scores)
+def precision_recall_at_threshold(y_true, scores, threshold: float) -> tuple[float, float]:
+    y, s = _as_arrays(y_true, scores)
+    pred = s >= float(threshold)
+    tp = int(np.sum(pred & (y == 1)))
+    fp = int(np.sum(pred & (y == 0)))
+    fn = int(np.sum((~pred) & (y == 1)))
 
-    if len(np.unique(y_true)) < 2:
-        logger.warning("Only one class present in validation labels; threshold selection is ill-defined")
-        return float("nan"), False
-
-    order = np.argsort(-scores)
-    y_sorted = y_true[order]
-    scores_sorted = scores[order]
-
-    tp = 0
-    fp = 0
-    total_pos = y_true.sum()
-    best_threshold = scores_sorted[-1]
-    best_precision = -1.0
-    best_recall = 0.0
-    recall_target_met = False
-
-    for i, s in enumerate(scores_sorted):
-        if y_sorted[i] == 1:
-            tp += 1
-        else:
-            fp += 1
-        recall = tp / max(total_pos, 1)
-        precision = tp / max(tp + fp, 1)
-        if recall >= target_recall:
-            recall_target_met = True
-            if precision > best_precision:
-                best_precision = precision
-                best_recall = recall
-                best_threshold = s
-
-    if not recall_target_met:
-        logger.warning("Target recall %.2f not reached; using max-recall threshold", target_recall)
-        tp = 0
-        fp = 0
-        best_recall = 0.0
-        best_precision = -1.0
-        best_threshold = scores_sorted[-1]
-        for i, s in enumerate(scores_sorted):
-            if y_sorted[i] == 1:
-                tp += 1
-            else:
-                fp += 1
-            recall = tp / max(total_pos, 1)
-            precision = tp / max(tp + fp, 1)
-            if recall > best_recall or (recall == best_recall and precision > best_precision):
-                best_recall = recall
-                best_precision = precision
-                best_threshold = s
-
-    return float(best_threshold), recall_target_met
-
-
-def fpr_at_threshold(y_true, scores, threshold):
-    y_true = np.asarray(y_true)
-    scores = np.asarray(scores)
-    preds = (scores >= threshold).astype(int)
-
-    fp = ((preds == 1) & (y_true == 0)).sum()
-    tn = ((preds == 0) & (y_true == 0)).sum()
-    if (fp + tn) == 0:
-        return float("nan")
-    return fp / (fp + tn)
-
-
-def coverage_at_threshold(scores, threshold):
-    scores = np.asarray(scores)
-    return float((scores >= threshold).mean())
-
-
-def precision_recall_at_threshold(y_true, scores, threshold):
-    y_true = np.asarray(y_true)
-    scores = np.asarray(scores)
-    preds = (scores >= threshold).astype(int)
-    tp = ((preds == 1) & (y_true == 1)).sum()
-    fp = ((preds == 1) & (y_true == 0)).sum()
-    fn = ((preds == 0) & (y_true == 1)).sum()
     precision = tp / max(tp + fp, 1)
     recall = tp / max(tp + fn, 1)
     return float(precision), float(recall)
 
 
-def precision_at_threshold(y_true, scores, threshold):
-    y_true = np.asarray(y_true)
-    scores = np.asarray(scores)
-    preds = (scores >= threshold).astype(int)
-    tp = ((preds == 1) & (y_true == 1)).sum()
-    fp = ((preds == 1) & (y_true == 0)).sum()
-    if (tp + fp) == 0:
-        return float("nan")
-    return tp / (tp + fp)
+def fpr_at_threshold(y_true, scores, threshold: float) -> float:
+    y, s = _as_arrays(y_true, scores)
+    pred = s >= float(threshold)
+    fp = int(np.sum(pred & (y == 0)))
+    n_neg = int(np.sum(y == 0))
+    return float(fp / max(n_neg, 1))
+
+
+def coverage_at_threshold(scores, threshold: float) -> float:
+    s = np.asarray(scores, dtype=float)
+    if s.size == 0:
+        return 0.0
+    return float(np.mean(s >= float(threshold)))
+
+
+def select_threshold_max_precision_at_recall(
+    y_true,
+    scores,
+    recall_target: float,
+    logger,
+) -> tuple[float, bool]:
+    y, s = _as_arrays(y_true, scores)
+    if s.size == 0:
+        raise ValueError("scores must not be empty")
+
+    finite_scores = s[np.isfinite(s)]
+    if finite_scores.size == 0:
+        raise ValueError("scores must contain at least one finite value")
+
+    thresholds = np.unique(finite_scores)[::-1]
+    candidates: list[tuple[float, float, float]] = []
+    best_fallback: tuple[float, float, float] | None = None
+
+    for threshold in thresholds:
+        precision, recall = precision_recall_at_threshold(y, s, threshold)
+        candidate = (precision, recall, float(threshold))
+        if best_fallback is None or (recall, precision, threshold) > (
+            best_fallback[1],
+            best_fallback[0],
+            best_fallback[2],
+        ):
+            best_fallback = candidate
+        if recall >= recall_target:
+            candidates.append(candidate)
+
+    if candidates:
+        precision, recall, threshold = max(candidates, key=lambda item: (item[0], item[1], item[2]))
+        return threshold, True
+
+    assert best_fallback is not None
+    precision, recall, threshold = best_fallback
+    logger.warning(
+        "Could not meet recall target %.3f; using threshold %.6f with recall %.3f and precision %.3f",
+        recall_target,
+        threshold,
+        recall,
+        precision,
+    )
+    return threshold, False
+
+
+def select_threshold_at_recall(y_true, scores, recall_target: float, logger) -> float:
+    threshold, _ = select_threshold_max_precision_at_recall(y_true, scores, recall_target, logger)
+    return threshold

@@ -65,6 +65,10 @@ EXPERT_FEATURES: dict[str, list[str]] = {
         "duration", "src_bytes", "dst_bytes", "src_pkts", "dst_pkts",
         "proto", "service", "conn_state",
     ],
+    "ton_iot_dedup": [
+        "duration", "src_bytes", "dst_bytes", "src_pkts", "dst_pkts",
+        "proto", "service", "conn_state",
+    ],
     "cic_iot2023": [
         "tot_size", "number", "iat", "variance",
         "header_length", "tcp", "udp", "icmp",
@@ -82,12 +86,15 @@ def compute_faithfulness(
     attributions: np.ndarray,
     top_k_values: tuple = (5, 10),
     max_samples: int = 500,
+    baseline: str = "zero",
 ) -> dict:
     """Comprehensiveness + sufficiency via feature ablation.
 
-    Baseline for ablated features = 0.0  (semantically: absent traffic /
-    median-imputed value; features are not standardised in this pipeline so
-    zero is a valid neutral sentinel rather than the training mean).
+    Baseline for ablated features is configurable:
+    - zero: set ablated features to 0.0 (baseline used historically)
+    - mean: set ablated features to per-feature training mean
+    - median: set ablated features to per-feature median
+    - min/max: less commonly used, but available using min/max of the sample
 
     Returns
     -------
@@ -110,6 +117,19 @@ def compute_faithfulness(
     # for operational IDS deployment where one rule set is applied globally)
     mean_abs = np.abs(attr).mean(axis=0)
 
+    if baseline == "zero":
+        baseline_values = np.zeros(X.shape[1], dtype=np.float32)
+    elif baseline == "mean":
+        baseline_values = np.mean(X, axis=0)
+    elif baseline == "median":
+        baseline_values = np.median(X, axis=0)
+    elif baseline == "min":
+        baseline_values = np.min(X, axis=0)
+    elif baseline == "max":
+        baseline_values = np.max(X, axis=0)
+    else:
+        raise ValueError("Baseline must be one of 'zero', 'mean', 'median', 'min', 'max'.")
+
     result = {}
     for k in top_k_values:
         k = min(k, X.shape[1])
@@ -117,12 +137,12 @@ def compute_faithfulness(
 
         # Comprehensiveness: ablate top-k features
         X_ablated = X.copy()
-        X_ablated[:, top_idx] = 0.0
+        X_ablated[:, top_idx] = baseline_values[top_idx]
         p_ablated = np.clip(predict_fn(X_ablated), 0.0, 1.0)
         comprehensiveness = float(np.mean(p_orig - p_ablated))
 
-        # Sufficiency: keep ONLY top-k features (zero the rest)
-        X_sufficient = np.zeros_like(X)
+        # Sufficiency: keep ONLY top-k features (replace others with baseline)
+        X_sufficient = np.tile(baseline_values, (X.shape[0], 1))
         X_sufficient[:, top_idx] = X[:, top_idx]
         p_sufficient = np.clip(predict_fn(X_sufficient), 0.0, 1.0)
         # Fraction of original confidence retained
@@ -130,6 +150,8 @@ def compute_faithfulness(
 
         result[f"comprehensiveness_k{k}"] = round(comprehensiveness, 4)
         result[f"sufficiency_k{k}"] = round(min(sufficiency, 1.0), 4)
+        if sufficiency > 1.0:
+            result[f"sufficiency_unclamped_k{k}"] = round(sufficiency, 4)
 
     return result
 
@@ -374,6 +396,7 @@ def run_xai_eval(
     out_path: Path,
     model_name: str = "unknown",
     max_faithfulness_samples: int = 500,
+    faithfulness_baseline: str = "zero",
     stability_n_samples: int = 50,
     stability_n_perturb: int = 10,
     stability_noise_std: float = 0.05,
@@ -429,6 +452,7 @@ def run_xai_eval(
             attributions,
             top_k_values=(5, 10),
             max_samples=max_faithfulness_samples,
+            baseline=faithfulness_baseline,
         )
     except Exception as exc:
         faith = {"error": str(exc)}

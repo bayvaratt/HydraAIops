@@ -198,11 +198,13 @@ def split_temporal(
     split_assertions: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not timestamp_col or timestamp_col not in df.columns:
-        logger.warning("Timestamp column missing; using row order as temporal proxy.")
-        order = np.arange(len(df))
-    else:
-        ts = pd.to_datetime(df[timestamp_col], errors="coerce")
-        order = np.argsort(ts.values)
+        raise RuntimeError(
+            f"Temporal split requires a valid timestamp_col, but "
+            f"'{timestamp_col}' is {'None' if not timestamp_col else 'missing from the DataFrame'}. "
+            f"Use a different split strategy or provide a valid timestamp column."
+        )
+    ts = pd.to_datetime(df[timestamp_col], errors="coerce")
+    order = np.argsort(ts.values)
 
     n = len(df)
     n_train = int(n * train_frac)

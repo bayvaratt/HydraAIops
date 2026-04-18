@@ -42,6 +42,7 @@ from hydra.models.tabular import (
     build_sklearn_gbdt,
     build_xgboost,
 )
+from hydra.models.deep import build_cnn_lstm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ MODEL_BUILDERS = {
     "sklearn_gbdt": build_sklearn_gbdt,
     "xgboost": build_xgboost,
     "lightgbm": build_lightgbm,
+    "cnn_lstm": build_cnn_lstm,
 }
 
 DEFAULT_DATASETS_CFG = "hydra/config/datasets.yaml"

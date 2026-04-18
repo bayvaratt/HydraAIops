@@ -93,14 +93,31 @@ def _build_net(n_features: int, hidden: int, n_classes: int):
                 nn.Dropout(0.3),
                 nn.Linear(hidden, out_dim),
             )
+            # Kaiming init for conv/linear layers to break output symmetry
+            # at initialisation — default PyTorch init can yield near-constant
+            # forward passes that starve early gradients.
+            for m in self.modules():
+                if isinstance(m, (nn.Conv1d, nn.Linear)):
+                    nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
 
         def forward(self, x):               # x: (batch, n_features)
             x = x.unsqueeze(1)              # (batch, 1, n_features)
             x = self.conv(x)               # (batch, hidden, n_features)
-            # MaxPool halves sequence length → cuts LSTM memory in half
-            x = torch.nn.functional.max_pool1d(x, 2)  # (batch, hidden, n_features//2)
+            # MaxPool halves sequence length → cuts LSTM memory in half.
+            # Pad odd-length sequences so no feature is silently dropped.
+            if x.size(2) % 2 == 1:
+                x = torch.nn.functional.pad(x, (0, 1))  # zero-pad last position
+            x = torch.nn.functional.max_pool1d(x, 2)  # (batch, hidden, ceil(n_features/2))
             x = x.permute(0, 2, 1)        # (batch, n_features//2, hidden)
-            out_seq, _ = self.lstm(x)      # (batch, n_features//2, hidden)
+            # Explicitly initialise LSTM hidden state to avoid PyTorch MPS
+            # bug where internal zeros() receives device as a Tensor instead
+            # of a torch.device (TypeError on MPS backend).
+            batch = x.size(0)
+            h0 = torch.zeros(1, batch, hidden, device=x.device, dtype=x.dtype)
+            c0 = torch.zeros(1, batch, hidden, device=x.device, dtype=x.dtype)
+            out_seq, _ = self.lstm(x, (h0, c0))  # (batch, n_features//2, hidden)
             # Global average pool: mean over all positions (not just last hidden).
             # Avoids vanishing gradient across 35-50 LSTM time steps.
             x = out_seq.mean(dim=1)        # (batch, hidden)
@@ -116,7 +133,10 @@ def _build_net(n_features: int, hidden: int, n_classes: int):
 # Sklearn wrapper
 # ---------------------------------------------------------------------------
 
-class CNNLSTMClassifier:
+from sklearn.base import BaseEstimator, ClassifierMixin
+
+
+class CNNLSTMClassifier(BaseEstimator, ClassifierMixin):
     """Sklearn-compatible CNN-LSTM classifier (binary and multiclass).
 
     Parameters
@@ -185,14 +205,13 @@ class CNNLSTMClassifier:
             n_pos = float((y_tr == 1).sum())
             n_neg = float((y_tr == 0).sum())
             pw = n_neg / max(n_pos, 1)
-            # Only upweight when attack is the minority class (pw > 1).
-            # When attack is the majority (pw < 1), this formula drives expected
-            # gradient to ~0 and the model fails to converge.
-            if pw > 1.0:
-                pos_weight = torch.tensor([pw], dtype=torch.float32).to(device)
-                criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            else:
-                criterion = nn.BCEWithLogitsLoss()
+            # Always apply pos_weight to handle class imbalance in both
+            # directions.  When attack is majority (pw < 1), this downweights
+            # the positive class so the model cannot trivially minimise loss
+            # by predicting all-attack.  Without this, the optimiser collapses
+            # to constant predictions and ROC-AUC becomes NaN.
+            pos_weight = torch.tensor([pw], dtype=torch.float32).to(device)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
             y_tr_t  = torch.tensor(y_tr,  dtype=torch.float32)
             y_val_t = torch.tensor(y_val, dtype=torch.float32)
         else:
@@ -220,6 +239,7 @@ class CNNLSTMClassifier:
                 xb, yb = xb.to(device), yb.to(device)
                 optimiser.zero_grad()
                 criterion(net(xb), yb).backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 optimiser.step()
             scheduler.step()
 

@@ -1,7 +1,7 @@
 # Data and run artifacts
-data/
-runs/
-results/
+/data/
+/runs/
+/results/
 
 # Generated artifacts
 artifacts/

@@ -36,8 +36,8 @@ def build_random_forest(random_state: int) -> ModelSpec:
 
 
 def build_sklearn_gbdt(random_state: int) -> ModelSpec:
-    # GradientBoostingClassifier has no class_weight; use sample_weight at fit time instead.
-    # The pipeline passes sample_weight via fit_params when class_weight is set on the spec.
+    # GradientBoostingClassifier has no class_weight parameter.
+    # Caller must pass sample_weight via pipeline.fit(..., model__sample_weight=weights).
     model = GradientBoostingClassifier(
         n_estimators=300,
         learning_rate=0.05,
@@ -47,7 +47,7 @@ def build_sklearn_gbdt(random_state: int) -> ModelSpec:
     return ModelSpec(name="sklearn_gbdt", backend="sklearn", model=model)
 
 
-def _build_xgboost_model(random_state: int):
+def _build_xgboost_model(random_state: int, scale_pos_weight: float = 1.0):
     import xgboost as xgb
 
     return xgb.XGBClassifier(
@@ -58,20 +58,21 @@ def _build_xgboost_model(random_state: int):
         colsample_bytree=0.9,
         objective="binary:logistic",
         eval_metric="logloss",
+        scale_pos_weight=scale_pos_weight,
         random_state=random_state,
         n_jobs=-1,
     )
 
 
-def build_xgboost(random_state: int) -> ModelSpec:
+def build_xgboost(random_state: int, scale_pos_weight: float = 1.0) -> ModelSpec:
     try:
-        model = _build_xgboost_model(random_state)
+        model = _build_xgboost_model(random_state, scale_pos_weight=scale_pos_weight)
         return ModelSpec(name="xgboost", backend="xgboost", model=model)
     except Exception as exc:
         raise RuntimeError("xgboost is not available; install xgboost to use this model.") from exc
 
 
-def build_lightgbm(random_state: int) -> ModelSpec:
+def build_lightgbm(random_state: int, scale_pos_weight: float = 1.0) -> ModelSpec:
     if os.environ.get("HYDRA_DISABLE_LIGHTGBM") == "1":
         spec = build_sklearn_gbdt(random_state)
         return ModelSpec(name="lightgbm", backend="sklearn_gbdt", model=spec.model)
@@ -84,6 +85,7 @@ def build_lightgbm(random_state: int) -> ModelSpec:
             num_leaves=64,
             subsample=0.9,
             colsample_bytree=0.9,
+            scale_pos_weight=scale_pos_weight,
             random_state=random_state,
             n_jobs=1,
             num_threads=1,
@@ -93,7 +95,7 @@ def build_lightgbm(random_state: int) -> ModelSpec:
         pass
 
     try:
-        model = _build_xgboost_model(random_state)
+        model = _build_xgboost_model(random_state, scale_pos_weight=scale_pos_weight)
         return ModelSpec(name="lightgbm", backend="xgboost", model=model)
     except Exception:
         pass

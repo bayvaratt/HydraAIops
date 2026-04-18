@@ -32,7 +32,7 @@ def _make_host_df(n_groups: int = 100) -> tuple[pd.DataFrame, pd.Series]:
     return df, y
 
 
-def _make_group_type_df(n_groups: int = 20) -> tuple[pd.DataFrame, pd.Series]:
+def _make_group_type_df(n_groups: int = 300) -> tuple[pd.DataFrame, pd.Series]:
     """Synthetic dataset with group_col and a multi-class type column.
 
     Each group has one row per attack type so every type appears across many groups.

@@ -319,6 +319,7 @@ def save_local_explanations(
     n_samples: int,
     random_state: int,
     logger,
+    occlusion_baseline: str = "zero",
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(random_state)
@@ -377,14 +378,25 @@ def save_local_explanations(
     except Exception:
         logger.info("SHAP not available; using occlusion fallback")
 
-    # Occlusion fallback: zero-out each feature column and measure delta
+    # Occlusion fallback: ablate each feature and measure delta.
+    # Baseline supports zero/mean/median for numeric stability and categorical plug-in.
     X_dense = X_trans.toarray() if hasattr(X_trans, "toarray") else np.asarray(X_trans)
+    X_dense = np.asarray(X_dense, dtype=np.float32)
     base_scores = model.predict_proba(X_dense)[:, 1]
+
+    if occlusion_baseline == "zero":
+        baseline_value = 0.0
+    elif occlusion_baseline == "mean":
+        baseline_value = np.mean(X_dense, axis=0)
+    elif occlusion_baseline == "median":
+        baseline_value = np.median(X_dense, axis=0)
+    else:
+        raise ValueError("occlusion_baseline must be one of 'zero', 'mean', 'median'.")
 
     contributions = np.zeros_like(X_dense)
     for j in range(X_dense.shape[1]):
         X_mut = X_dense.copy()
-        X_mut[:, j] = 0.0
+        X_mut[:, j] = baseline_value if np.ndim(baseline_value) == 0 else baseline_value[j]
         new_scores = model.predict_proba(X_mut)[:, 1]
         contributions[:, j] = base_scores - new_scores
 
@@ -568,7 +580,10 @@ def save_anchors_explanations(
             logger.warning("Anchors fit failed (%s); skipping.", exc)
         return
 
+    # Use signal alarm on UNIX; otherwise, run without a hard global timeout.
     import signal
+
+    use_alarm = hasattr(signal, "SIGALRM")
 
     def _timeout_handler(signum, frame):
         raise TimeoutError("Anchors explain timed out")
@@ -577,12 +592,14 @@ def save_anchors_explanations(
     for idx in sample_idx:
         x = X_val_dense[idx]
         try:
-            signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(30)  # 30-second hard limit per sample
+            if use_alarm:
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(30)  # 30-second hard limit per sample
             try:
                 exp = explainer.explain(x, threshold=0.95)
             finally:
-                signal.alarm(0)  # cancel alarm
+                if use_alarm:
+                    signal.alarm(0)  # cancel alarm
             anchor_str = " AND ".join(exp.anchor) if exp.anchor else "(empty)"
             results.append({
                 "sample_id": int(idx),

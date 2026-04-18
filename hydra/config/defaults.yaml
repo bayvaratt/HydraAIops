@@ -18,5 +18,10 @@ models:
 explain:
   local_samples: 50
   random_state: 42
+  faithfulness_baseline: "zero"
+  occlusion_baseline: "zero"
+  stability_noise_std: 0.05
+  plausibility_top_k: 10
+  timeliness_n: 100
 run:
   max_rows: null

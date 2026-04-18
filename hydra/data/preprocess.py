@@ -57,8 +57,7 @@ def _high_cardinality(series: pd.Series) -> bool:
     if n == 0:
         return False
     nunique = series.nunique(dropna=True)
-    ratio = nunique / max(n, 1)
-    return nunique > 50 and ratio > 0.5
+    return nunique > 50
 
 
 def _match_cols(cols: List[str], needles: List[str]) -> List[str]:

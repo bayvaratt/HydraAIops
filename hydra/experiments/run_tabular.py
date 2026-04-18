@@ -530,6 +530,13 @@ def run(args) -> Dict[str, object]:
         two_stage_enabled = False
     if two_stage_enabled:
         type_series = df[type_col]
+        actual_type_values = set(type_series.dropna().unique())
+        if normal_type_value not in actual_type_values:
+            logger.warning(
+                "normal_type_value '%s' not found in type column '%s'. "
+                "Two-stage metrics will be incorrect. Available values: %s",
+                normal_type_value, type_col, sorted(actual_type_values)[:20],
+            )
 
     # Identifier diagnostics: which categorical columns are included in features.
     categorical_cols = cfg.categorical_cols or []
@@ -912,6 +919,8 @@ def run(args) -> Dict[str, object]:
         prevalence = float(y_test_used.mean()) if len(y_test_used) else 0.0
         pr_auc = compute_pr_auc(y_test_used, scores_test)
         roc_auc = compute_roc_auc(y_test_used, scores_test, logger)
+        pr_auc_val = compute_pr_auc(y_val_used, scores_val)
+        roc_auc_val = compute_roc_auc(y_val_used, scores_val, logger)
         warn_on_constant_scores(scores_test, pr_auc, prevalence, logger)
 
         threshold, recall_target_met = select_threshold_max_precision_at_recall(
@@ -933,6 +942,8 @@ def run(args) -> Dict[str, object]:
             "pr_auc": pr_auc,
             "pr_lift": pr_auc - prevalence,
             "roc_auc": roc_auc,
+            "pr_auc_val": pr_auc_val,
+            "roc_auc_val": roc_auc_val,
             "fpr_at_recall_0_90": fpr,
             "threshold_at_recall_0_90": threshold,
             "recall_target_met": recall_target_met,
@@ -1007,6 +1018,10 @@ def run(args) -> Dict[str, object]:
             _model_test_scores["gnn"] = np.asarray(_scores_test, dtype=float)
             continue
 
+        _n_pos = int(y_train.sum())
+        _n_neg = int((y_train == 0).sum())
+        _scale_pos_weight = _n_neg / _n_pos if _n_pos > 0 else 1.0
+
         if model_name == "logreg":
             spec_model = build_logreg(seed)
         elif model_name == "random_forest":
@@ -1014,9 +1029,9 @@ def run(args) -> Dict[str, object]:
         elif model_name == "sklearn_gbdt":
             spec_model = build_sklearn_gbdt(seed)
         elif model_name == "lightgbm":
-            spec_model = build_lightgbm(seed)
+            spec_model = build_lightgbm(seed, scale_pos_weight=_scale_pos_weight)
         elif model_name == "xgboost":
-            spec_model = build_xgboost(seed)
+            spec_model = build_xgboost(seed, scale_pos_weight=_scale_pos_weight)
         elif model_name == "cnn_lstm":
             spec_model = build_cnn_lstm(seed)
         else:
@@ -1027,7 +1042,11 @@ def run(args) -> Dict[str, object]:
             steps.append(("select", feature_selector))
         steps.append(("model", spec_model.model))
         pipeline = Pipeline(steps=steps)
-        pipeline.fit(X_train_raw, y_train)
+        if model_name == "sklearn_gbdt":
+            _sample_weight = np.where(y_train == 1, _n_neg / _n_pos, 1.0).astype(np.float32)
+            pipeline.fit(X_train_raw, y_train, model__sample_weight=_sample_weight)
+        else:
+            pipeline.fit(X_train_raw, y_train)
 
         scores_val = pipeline.predict_proba(X_val_raw)[:, 1]
         scores_test = pipeline.predict_proba(X_test_raw)[:, 1]
@@ -1073,6 +1092,7 @@ def run(args) -> Dict[str, object]:
                 defaults["explain"]["local_samples"],
                 defaults["explain"]["random_state"],
                 logger,
+                occlusion_baseline=defaults["explain"].get("occlusion_baseline", "zero"),
             )
 
             # --- XAI Evaluation (5 criteria) ---
@@ -1150,6 +1170,10 @@ def run(args) -> Dict[str, object]:
                     max_faithfulness_samples=_max_faith_n,
                     stability_n_samples=_stab_n,
                     stability_n_perturb=_stab_np,
+                    faithfulness_baseline=defaults["explain"].get("faithfulness_baseline", "zero"),
+                    stability_noise_std=defaults["explain"].get("stability_noise_std", 0.05),
+                    plausibility_top_k=defaults["explain"].get("plausibility_top_k", 10),
+                    timeliness_n=defaults["explain"].get("timeliness_n", 100),
                     logger=logger,
                 )
             except Exception as _xai_exc:
