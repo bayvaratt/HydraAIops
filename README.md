@@ -1,78 +1,124 @@
 # HYDRA: Explainability-Driven Intrusion Detection
 
-This repo provides a clean, reproducible experimental pipeline for binary intrusion detection on tabular network-flow data. Explanations are first-class outputs (global + local). The pipeline emphasizes leakage-safe splits, honest baselines, and deterministic runs.
+A reproducible experimental pipeline for binary intrusion detection on tabular network-flow data with first-class explainability (global + local SHAP). Supports two datasets (TON_IoT, CIC-IoT-2023), cross-dataset generalisation, and leakage-safe evaluation.
+
+## Repo Structure
+
+```
+hydra/                  # Main Python package
+├── config/             # Dataset configs (datasets.yaml, defaults.yaml)
+├── data/               # Data loading, splitting, preprocessing, alignment
+├── models/             # Model builders (logreg, RF, GBDT, XGBoost, LightGBM, CNN-LSTM)
+├── experiments/        # Experiment runners (single-dataset, cross-dataset, matrix)
+├── evaluation/         # Metrics, thresholds
+├── xai/                # SHAP explainability (global, local, per-type)
+├── analysis/           # Result aggregation and plotting
+└── features/           # Feature engineering
+scripts/                # Utility scripts (data prep, overnight runs, figure generation)
+tests/                  # Test suite
+data/                   # Datasets (gitignored)
+results/                # Experiment outputs (gitignored)
+models/                 # Saved model weights
+docs/                   # Documentation
+Makefile                # Experiment targets
+```
 
 ## Quickstart
 
-Single run:
+Single run (TON_IoT):
 ```bash
-python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behaviour_only --split_strategy host --group_col src_ip --seed 42
+python -m hydra.experiments.run_tabular \
+  --dataset ton_iot \
+  --feature_regime behaviour_only \
+  --split_strategy host \
+  --group_col src_ip \
+  --seed 42
 ```
 
-Permutation leakage probe:
+Single run (CIC-IoT-2023):
 ```bash
-python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime behaviour_only --split_strategy host --group_col src_ip --seed 42 --label_permutation_probe
-```
-ROC-AUC under a null permutation is symmetric around 0.5, so the probe checks absolute deviation from 0.5 with a dynamic tolerance based on test-set class counts. Use `--permutation_repeats N` (default 3) to average over multiple shuffles.
-
-Duplicate leakage audit:
-Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. The default train→test overlap rate uses the test-set denominator (by_test). Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail if train→test overlap exceeds the threshold. Both by_test and by_train rates are recorded in `evaluation_meta.json`.
-
-Decision metrics:
-- `pr_lift = pr_auc - prevalence_test`
-- `precision@recall=0.90` uses a threshold chosen on validation to maximize precision while meeting recall≥0.90 (or max recall if the target is unreachable).
-Note: when `HYDRA_DISABLE_LIGHTGBM=1`, the `lightgbm` slot uses a `sklearn_gbdt` fallback (GradientBoostingClassifier) and logs the backend used.
-
-Matrix runner:
-```bash
-python -m hydra.pipelines.run_experiments --dataset ton_iot --max_rows 5000 --seed 42 --label_permutation_probe
+python -m hydra.experiments.run_tabular \
+  --dataset cic_iot2023 \
+  --feature_regime behaviour_only \
+  --split_strategy stratified \
+  --seed 42
 ```
 
-Consolidate results:
+Cross-dataset generalisation:
 ```bash
-python scripts/consolidate_results.py --runs_dir runs/ton_iot --out_dir runs/ton_iot/consolidated
+python -m hydra.experiments.run_cross_dataset \
+  --source ton_iot --target cic_iot2023 \
+  --models logreg random_forest xgboost \
+  --seed 42
 ```
 
-Paper replication (Dharini et al., 2026):
+Full experiment matrix (TON_IoT, 36 runs):
 ```bash
-python -m hydra.pipelines.run_tabular --dataset ton_iot --feature_regime paper_5feat --split_strategy host --group_col src_ip --seed 42
+make ton-matrix
 ```
 
-Paper comparison matrix:
+Cross-dataset (both directions):
 ```bash
-python -m hydra.pipelines.run_experiments --dataset ton_iot --seed 42 --max_rows 5000 --include_paper_comparison
+make cross-dataset
 ```
 
-## Dataset configuration
-Edit `hydra/config/datasets.yaml` to point to your local dataset paths and columns. The loader supports `.csv` and `.parquet`.
+## Leakage Safeguards
+
+**Permutation probe:**
+```bash
+python -m hydra.experiments.run_tabular \
+  --dataset ton_iot --feature_regime behaviour_only \
+  --split_strategy host --group_col src_ip --seed 42 \
+  --label_permutation_probe
+```
+ROC-AUC under null permutation should be ~0.5. Use `--permutation_repeats N` (default 3) to average.
+
+**Duplicate leakage audit:**
+Each run writes `evaluation_meta.json` with train/val/test label counts and post-preprocessing row-hash overlap rates. Use `--duplicate_leakage_threshold` (default 0.001) and `--fail_on_duplicate_leakage` to hard-fail on excessive overlap.
+
+## Datasets
+
+Edit `hydra/config/datasets.yaml` to point to your local dataset paths. Supports `.csv` and `.parquet`.
 
 Required per dataset:
 - `path`: local file path
 - `label_col`: binary label column
-- `positive_label`: value mapped to 1 (e.g., 1 or "attack")
+- `positive_label`: value mapped to 1
 
-Optional:
-- `timestamp_col`
-- `group_col` (default for host split)
-- `duration_col`, `src_bytes_col`, `dst_bytes_col`, `src_pkts_col`, `dst_pkts_col` (for baseline_threshold)
-- `categorical_cols` and `numeric_cols` (overrides inference)
+Optional: `timestamp_col`, `group_col`, `categorical_cols`, `numeric_cols`
 
-## Notes
-- Splits:
-  - `host`: GroupShuffleSplit with strict disjointness checks.
-  - `temporal`: chronological split (train/val/test).
-  - `stratified`: allowed only as a naive baseline (labeled not deployment-realistic).
-- LightGBM is optional; if unavailable, a fallback model is used with identical interface.
-- Explainability:
-  - Global importance via built-in or permutation importance.
-  - Local explanations via SHAP if available; otherwise a deterministic occlusion fallback.
+### Supported datasets
+- **TON_IoT** (~211k rows) -- split strategies: `host`, `temporal`, `stratified`
+- **CIC-IoT-2023** (~3.18M rows) -- split strategy: `stratified`
+
+## Models
+
+- Logistic Regression
+- Random Forest
+- Gradient Boosted Trees (sklearn)
+- XGBoost
+- LightGBM (optional, falls back to sklearn GBDT if unavailable)
+- CNN-LSTM (deep learning, requires PyTorch)
+
+## Explainability
+
+- Global feature importance (SHAP bar plots)
+- Local explanations (SHAP beeswarm)
+- Per-attack-type SHAP heatmaps (Stage 2 multiclass)
 
 ## Installation
-Base dependencies:
+
 ```bash
 pip install -e .
 ```
-Optional:
+
+With optional dependencies:
 ```bash
-pip install -e .[lightgbm,shap,plots]
+pip install -e ".[xgboost,lightgbm,shap,plots,torch]"
+```
+
+## Testing
+
+```bash
+pytest
 ```
