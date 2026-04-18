@@ -6,13 +6,8 @@ results/
 # Generated artifacts
 artifacts/
 
-# Dissertation (LaTeX build artifacts)
-dissertation/*.aux
-dissertation/*.log
-dissertation/*.lof
-dissertation/*.lot
-dissertation/*.out
-dissertation/*.toc
+# Dissertation
+dissertation/
 
 # Python
 __pycache__/
