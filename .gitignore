@@ -1,6 +1,23 @@
 # Data and run artifacts
 data/
 runs/
+results/
+
+# Generated artifacts (intermediate CSVs, models, plots)
+X_*.csv
+y_*.csv
+cnn_lstm_*
+preprocessing_metadata.pkl
+class_distribution.png
+metrics_summary.csv
+
+# Dissertation (LaTeX build artifacts)
+dissertation/*.aux
+dissertation/*.log
+dissertation/*.lof
+dissertation/*.lot
+dissertation/*.out
+dissertation/*.toc
 
 # Python
 __pycache__/
