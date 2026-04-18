@@ -89,7 +89,7 @@ Optional: `timestamp_col`, `group_col`, `categorical_cols`, `numeric_cols`
 
 ### Supported datasets
 - **TON_IoT** (~211k rows) -- split strategies: `host`, `temporal`, `stratified`
-  - Download: https://research.unsw.edu.au/projects/toniot-datasets
+  - Download: https://www.kaggle.com/datasets/arnobbhowmik/ton-iot-network-dataset
 - **CIC-IoT-2023** (~3.18M rows) -- split strategy: `stratified`
   - Download: https://www.unb.ca/cic/datasets/iotdataset-2023.html
 
